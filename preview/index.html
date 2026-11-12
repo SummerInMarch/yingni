@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f7f2">
+  <title>映你 · 界面预览</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="phone">
+    <div class="status"><span>9:41</span><span>● ● ▰</span></div>
+    <section class="screen active" id="home" aria-label="首页">
+      <header class="topbar"><div class="brand"><span class="brand-mark">映</span><span>映你 <small>YINGNI</small></span></div><button class="round" data-go="profile" aria-label="我的">☻</button></header>
+      <div class="home-intro"><div class="eyebrow"><span class="spark">✳</span> 给生活一点想象</div><h1>今天，想怎么<br><em>记录自己？</em></h1><p>每一个平凡瞬间，都值得被好好珍藏。</p></div>
+      <div class="mode-label"><span>选择一个模式</span><span>CHOOSE YOUR SPACE ↘</span></div>
+      <button class="mode-card chat-card" data-go="chat"><div class="card-copy"><span class="card-kicker">01 / CHAT</span><h2>和诺诺聊聊 <span>↗</span></h2><p>有趣的事，烦心的事<br>都可以慢慢说。</p><span class="pill">你的 AI 朋友</span></div><div class="nono-art"><span class="orb orb-one"></span><span class="orb orb-two"></span><span class="face"><i></i><i></i><b>⌣</b></span><span class="art-star">✳</span></div></button>
+      <button class="mode-card create-card" data-go="explore"><div class="card-copy"><span class="card-kicker">02 / CREATE</span><h2>去创造 <span>↗</span></h2><p>把日常变成故事<br>让想象有了画面。</p><span class="pill">发现更多可能</span></div><div class="paper-art"><div class="paper paper-back"></div><div class="paper paper-front"><span>✦</span><div class="sun"></div><div class="hill"></div></div><span class="paper-spark">✳</span></div></button>
+      <div class="home-foot"><span>MADE FOR YOUR MOMENTS</span><span>✳</span><span>每一刻，都有意义</span></div>
+    </section>
+    <section class="screen" id="chat" aria-label="聊天">
+      <header class="page-header"><button class="back" data-go="home" aria-label="返回">←</button><div class="chat-heading"><span class="mini-face">◡</span><div><strong>诺诺</strong><small><i></i> 在这里，陪着你</small></div></div><button class="round" data-go="profile" aria-label="设置">⋯</button></header>
+      <div class="chat-content" id="messages"><div class="date-label">今天 · 一个刚刚好的时刻</div><div class="message-row"><span class="avatar">◡</span><div class="bubble">嗨，我是诺诺。<br>今天的你，过得怎么样？<span class="wave"> ✳</span></div></div><div class="message-row mine"><div class="bubble">还不错！想找你聊聊天。</div></div><div class="message-row"><span class="avatar">◡</span><div class="bubble">好呀，我在呢。有什么有趣的事，快说给我听听 👀</div></div></div>
+      <div class="chat-composer"><form id="chat-form"><input id="chat-input" placeholder="和诺诺说点什么…" aria-label="聊天内容"><button aria-label="发送">↑</button></form><p>诺诺会记住经你授权的相处点滴</p></div>
+    </section>
+    <section class="screen" id="explore" aria-label="创造">
+      <header class="page-header"><button class="back" data-go="home" aria-label="返回">←</button><span class="page-title">发现</span><button class="round" data-go="profile" aria-label="我的">☻</button></header>
+      <div class="explore-body"><div class="eyebrow"><span class="spark">✳</span> 让想法发生</div><h1>生活的另一种<br><em>打开方式。</em></h1><p class="muted">从一张图片、一个念头开始。</p><div class="section-title"><strong>你的创作空间</strong><span>YOUR SPACE</span></div><button class="feature" data-go="create"><div class="feature-visual"><span class="feature-sun"></span><span class="feature-hill"></span><span class="feature-frame">✳</span><span class="feature-tag">YOUR STORY</span></div><div class="feature-copy"><div><span class="card-kicker">IMAGE STORIES / 01</span><h2>生成一组图片</h2><p>用喜欢的画风，讲述你的故事。</p></div><span class="arrow-circle">↗</span></div></button><p class="more-note">✳ &nbsp; 更多有趣的事，正在慢慢发生</p></div>
+    </section>
+    <section class="screen" id="create" aria-label="图片生成">
+      <header class="page-header"><button class="back" data-go="explore" aria-label="返回">←</button><span class="page-title">图片故事</span><button class="text-button" data-go="profile">我的</button></header>
+      <div class="create-body"><div class="eyebrow"><span class="spark">✳</span> 从一个念头开始</div><h1>把你的日常，<br><em>画成故事。</em></h1><p class="muted">选一种喜欢的画风，剩下的交给想象。</p>
+        <div class="section-title"><strong>选择画风</strong><span>STYLE</span></div><div class="style-grid"><button class="style-option selected" data-style="动漫日常"><span class="style-art anime"><i>✦</i></span><strong>动漫日常</strong><small>ANIME</small></button><button class="style-option" data-style="素描时光"><span class="style-art sketch"><i>✳</i></span><strong>素描时光</strong><small>SKETCH</small></button><button class="style-option" data-style="电影质感"><span class="style-art cinema"><i>◒</i></span><strong>电影质感</strong><small>CINEMATIC</small></button></div>
+        <div class="section-title"><strong>添加参考图 <small>可选</small></strong><span>REFERENCE</span></div><label class="upload"><input type="file" id="reference" accept="image/*" multiple hidden><span class="upload-icon">＋</span><span><strong id="upload-title">上传参考图片</strong><small>画风、场景或人物，诺诺会试着理解</small></span><span class="upload-arrow">↗</span></label>
+        <div class="section-title"><strong>说说你的想法</strong><span>YOUR STORY</span></div><textarea id="story" placeholder="比如：画一个我在咖啡馆学习的下午，窗外下着雨……"></textarea>
+        <div class="quantity"><div><strong>生成数量</strong><small>一组连续的故事画面</small></div><div class="stepper"><button id="minus" aria-label="减少数量">−</button><span id="count">4</span><button id="plus" aria-label="增加数量">＋</button></div></div>
+        <button class="primary" id="generate">开始生成 <span>↗</span></button><p class="hint">✳ 诺诺会结合你的描述与相关记忆</p>
+      </div>
+    </section>
+    <section class="screen" id="result" aria-label="生成结果"><header class="page-header"><button class="back" data-go="create" aria-label="返回">←</button><span class="page-title">你的图片故事</span><span class="header-spacer"></span></header><div class="result-body"><div class="eyebrow"><span class="spark">✳</span> YOUR STORY</div><h1>故事，<em>有画面了。</em></h1><p class="muted">每一张，都是属于你的片刻。</p><div id="result-grid" class="result-grid"></div><button class="primary" data-go="create">再创作一个故事 <span>↗</span></button></div></section>
+    <section class="screen" id="profile" aria-label="我的"><header class="page-header"><button class="back" id="profile-back" aria-label="返回">←</button><span class="page-title">我的</span><span class="header-spacer"></span></header><div class="profile-body"><div class="profile-avatar">映</div><h1>你好，<em>创作者。</em></h1><p class="muted">在这里，收藏你的灵感与故事。</p><div class="profile-list"><div><span>✳</span><strong>我的作品</strong><i>↗</i></div><div><span>▧</span><strong>我的模板</strong><i>↗</i></div><div><span>♡</span><strong>诺诺与记忆</strong><i>↗</i></div></div><p class="more-note">YINGNI · 给生活一点想象</p></div></section>
+    <div class="toast" role="status" id="toast"></div>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
