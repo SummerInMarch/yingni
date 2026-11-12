@@ -65,3 +65,7 @@ document.querySelector('#chat-form').addEventListener('submit', event => {
   toast('这是界面预览，诺诺暂未接入');
 });
 document.querySelectorAll('.profile-list div').forEach(item => item.addEventListener('click', () => toast('此功能将在后续开发')));
+
+// 预览总览可直接打开指定页面，完整流程仍可从首页进入。
+const initialScreen = location.hash.slice(1);
+if (initialScreen && document.getElementById(initialScreen)?.classList.contains('screen')) showScreen(initialScreen);
