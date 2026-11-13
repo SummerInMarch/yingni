@@ -224,7 +224,18 @@ async function loadFiles() {
       const card = document.createElement('div'); card.className = 'file-card';
       const title = document.createElement('strong'); title.textContent = displayFileName(file.name); card.append(title);
       const detail = document.createElement('p'); detail.textContent = file.read_error || `${Math.max(1, Math.ceil(file.size / 1024))} KB · 可供诺诺阅读`; card.append(detail);
+      const status = document.createElement('p'); status.textContent = '正在查看文件索引状态…'; card.append(status);
       const actions = document.createElement('div'); actions.className = 'file-actions';
+      const retry = document.createElement('button'); retry.textContent = '建立索引'; retry.hidden = true;
+      async function refreshIndex() {
+        try {
+          const result = await api(`files/${file.id}/index`);
+          status.textContent = {ready:'索引已就绪', queued:'正在建立索引', failed:'索引失败，可重试', unindexed:'尚未建立索引'}[result.status] || '索引状态未知';
+          retry.hidden = result.status === 'ready' || result.status === 'queued';
+        } catch { status.textContent = '索引状态暂时不可用'; }
+      }
+      retry.onclick = async () => { try { await api(`files/${file.id}/index`, 'POST'); await refreshIndex(); } catch(e) { toast(e.message); } };
+      actions.append(retry); refreshIndex();
       const use = document.createElement('button'); use.textContent = '添加到聊天'; use.onclick = () => { selectFile(file); screen('chat'); };
       const save = document.createElement('button'); save.textContent = '保存到手机'; save.onclick = () => downloadDocument(file);
       const remove = document.createElement('button'); remove.textContent = '删除'; remove.onclick = async () => {

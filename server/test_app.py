@@ -31,8 +31,12 @@ def text_pdf():
 
 
 class AppTest(unittest.TestCase):
-    @patch.object(app, 'queue_document_index')
-    def test_user_journey(self, queue_index):
+    def test_user_journey(self):
+        test_index = app.DocumentIndex(app.db, lambda texts, query: [[1.0, 0.0] for _ in texts], lambda text: text, lambda conn, file_id: True)
+        index_patch = patch.object(app, 'get_document_index', return_value=test_index)
+        executor_patch = patch.object(app.index_executor, 'submit', side_effect=lambda fn, *args: fn(*args))
+        index_patch.start(); executor_patch.start()
+        self.addCleanup(index_patch.stop); self.addCleanup(executor_patch.stop)
         client = app.app.test_client()
         self.assertEqual(client.get('/works').status_code, 401)
         self.assertEqual(client.post('/setup', json={'setup_token': 'wrong'}).status_code, 403)
@@ -83,7 +87,7 @@ class AppTest(unittest.TestCase):
         self.assertEqual(client.post('/files', headers=headers, data={'file': (io.BytesIO(b'bad'), 'sample.exe')}, content_type='multipart/form-data').status_code, 400)
         captured = []
         def fake_chat(messages, json_mode=False):
-            if json_mode: return '{"memory":"喜欢素描","name":"诺诺"}'
+            if json_mode: return '{"memory":"喜欢素描","name":"诺诺","use_files":true,"query":"文件内容"}'
             captured.append(messages); return '已阅读'
         with patch.object(app, 'deepseek', side_effect=fake_chat), patch.object(app, 'schedule_avatar_decision'):
             reply = client.post('/chat', headers=headers, json={'message': '总结文件', 'attachments': [note['id'], word['id'], pdf['id']]})
@@ -101,6 +105,17 @@ class AppTest(unittest.TestCase):
             self.assertEqual(client.post('/chat', headers=headers, json={'message': '', 'attachments': [note['id']]}).status_code, 200)
         self.assertEqual(client.get('/messages', headers=headers).json['messages'][-2]['content'], '')
         self.assertEqual(len(client.get('/files', headers=headers).json['files']), 4)
+        unrelated_calls = []
+        def unrelated(messages, json_mode=False):
+            if json_mode:
+                if 'use_files' in messages[0]['content']:
+                    return '{"use_files": false, "query": "", "full_summary": false}'
+                return '{"memory":"", "name":"诺诺"}'
+            unrelated_calls.append(messages)
+            return '今天天气不错'
+        with patch.object(app, 'deepseek', side_effect=unrelated), patch.object(app, 'schedule_avatar_decision'):
+            self.assertEqual(client.post('/chat', headers=headers, json={'message': '今天天气真好'}).status_code, 200)
+        self.assertFalse(any('以下是已保存的文件提取文本' in message['content'] or '文件：测试.txt' in message['content'] for message in unrelated_calls[-1]))
         with patch.object(app.avatar_executor, 'submit') as submit:
             app.schedule_avatar_decision([], '诺诺')
             app.schedule_avatar_decision([], '诺诺')
@@ -120,14 +135,14 @@ class AppTest(unittest.TestCase):
             recording = client.post('/voice/transcribe', headers=headers, data={'file': (io.BytesIO(b'\x1a\x45\xdf\xa3voice'), 'voice.webm')}, content_type='multipart/form-data')
             self.assertEqual(recording.status_code, 200)
         voice_id = recording.json['voice_id']
-        with patch.object(app, 'deepseek', side_effect=['你好呀', '{"memory":"","name":"诺诺"}']), patch.object(app, 'schedule_avatar_decision'), patch.object(app.secrets, 'randbelow', return_value=0), patch.object(app.voice, 'synthesize', return_value=(b'test wav', 2)):
+        with patch.object(app, 'deepseek', side_effect=['{"use_files":false}', '你好呀', '{"memory":"","name":"诺诺"}']), patch.object(app, 'schedule_avatar_decision'), patch.object(app.secrets, 'randbelow', return_value=0), patch.object(app.voice, 'synthesize', return_value=(b'test wav', 2)):
             spoken = client.post('/chat', headers=headers, json={'message': recording.json['text'], 'voice_id': voice_id})
             self.assertTrue(spoken.json['voice_id'])
         spoken_audio = client.get('/voice/' + spoken.json['voice_id'], headers=headers)
         self.assertEqual(spoken_audio.data, b'test wav'); spoken_audio.close()
         self.assertEqual(client.get('/voice/' + voice_id).status_code, 401)
         self.assertEqual(client.get('/messages', headers=headers).json['messages'][-2]['voice_id'], voice_id)
-        with patch.object(app, 'deepseek', side_effect=['很长的语音', '{"memory":"","name":"诺诺"}']), patch.object(app, 'schedule_avatar_decision'), patch.object(app.secrets, 'randbelow', return_value=0), patch.object(app.voice, 'synthesize', return_value=(b'test wav', 21)):
+        with patch.object(app, 'deepseek', side_effect=['{"use_files":false}', '很长的语音', '{"memory":"","name":"诺诺"}']), patch.object(app, 'schedule_avatar_decision'), patch.object(app.secrets, 'randbelow', return_value=0), patch.object(app.voice, 'synthesize', return_value=(b'test wav', 21)):
             self.assertFalse(client.post('/chat', headers=headers, json={'message': '继续说'}).json['voice_id'])
         with patch.object(app, 'deepseek', return_value='{"scenes":["第一幕","第二幕"]}'), patch.object(app, 'make_image', return_value=b'fake image'):
             generated = client.post('/generate', headers=headers, json={'story': '测试故事', 'count': 2, 'refs': []})

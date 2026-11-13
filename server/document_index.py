@@ -1,6 +1,7 @@
 """文件摘要向量索引；原文仅在需要回答时取回。"""
 import json
 import math
+import re
 import threading
 
 
@@ -51,6 +52,13 @@ class DocumentIndex:
             self.initialize(conn)
             placeholders = ','.join('?' for _ in file_ids)
             rows = conn.execute(f'SELECT file_id, position, content, summary, vector FROM document_index WHERE file_id IN ({placeholders})', file_ids).fetchall()
+        terms = re.findall(r'[a-z0-9]{2,}|[\u4e00-\u9fff]{2,}', question.lower())
+        words = set()
+        for term in terms:
+            if re.fullmatch(r'[\u4e00-\u9fff]+', term):
+                words.update(term[i:i + 2] for i in range(len(term) - 1))
+            else:
+                words.add(term)
         matches = []
         for row in rows:
             vector = json.loads(row[4])
@@ -58,8 +66,10 @@ class DocumentIndex:
                 continue
             length = math.sqrt(sum(value * value for value in vector))
             score = sum(a * b for a, b in zip(query, vector)) / (norm * length) if length else 0
-            matches.append({'file_id': row[0], 'position': row[1], 'content': row[2], 'summary': row[3], 'score': score})
-        return sorted(matches, key=lambda item: item['score'], reverse=True)[:limit]
+            haystack = (row[2] + ' ' + row[3]).lower()
+            keyword_score = sum(word in haystack for word in words) / len(words) if words else 0
+            matches.append({'file_id': row[0], 'position': row[1], 'content': row[2], 'summary': row[3], 'score': score, 'keyword_score': keyword_score})
+        return sorted(matches, key=lambda item: item['score'] + 0.2 * item['keyword_score'], reverse=True)[:limit]
 
 
 class LocalEmbedding:
