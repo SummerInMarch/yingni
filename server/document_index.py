@@ -21,8 +21,16 @@ class DocumentIndex:
 
     def build(self, file_id, text, chunk_size=4000):
         # 摘要和原文按顺序对应，完整生成后再一次性写入。
-        chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-        chunks = [chunk for chunk in chunks if chunk.strip()]
+        if chunk_size <= 0:
+            raise ValueError('分段长度必须大于零')
+        overlap = min(300, chunk_size // 10)
+        chunks = []
+        for start in range(0, len(text), chunk_size - overlap):
+            chunk = text[start:start + chunk_size]
+            if chunk.strip():
+                chunks.append(chunk)
+            if start + chunk_size >= len(text):
+                break
         if not chunks:
             raise ValueError('文件没有可索引的文字')
         summaries = [self.summarize(chunk).strip() for chunk in chunks]

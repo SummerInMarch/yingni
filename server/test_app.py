@@ -205,6 +205,15 @@ class DocumentUploadTest(unittest.TestCase):
                     self.assertEqual(client.get('/files/' + file_id + '/index', headers=headers).json['status'], 'ready')
                     with app.db() as conn:
                         self.assertGreater(conn.execute('SELECT COUNT(*) FROM document_index WHERE file_id=?', (file_id,)).fetchone()[0], 1)
+                    with app.db() as conn:
+                        conn.execute("UPDATE attachments SET text='', read_error='文件文字超过 6 万字' WHERE id=?", (file_id,))
+                        conn.execute('DELETE FROM document_index WHERE file_id=?', (file_id,))
+                        conn.execute('DELETE FROM document_jobs WHERE file_id=?', (file_id,))
+                    self.assertEqual(client.post('/files/' + file_id + '/index', headers=headers).json['status'], 'ready')
+                    with app.db() as conn:
+                        restored = conn.execute('SELECT text,read_error FROM attachments WHERE id=?', (file_id,)).fetchone()
+                        self.assertGreater(len(restored['text']), 60000)
+                        self.assertEqual(restored['read_error'], '')
                     with patch.object(app, 'get_document_index', side_effect=RuntimeError('test failure')):
                         failed = client.post('/files', headers=headers, data={'file': (io.BytesIO(b'retry text'), 'retry.txt')}, content_type='multipart/form-data')
                     retry_id = failed.json['file']['id']

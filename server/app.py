@@ -200,7 +200,6 @@ def messages():
 
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
-MAX_FILE_TEXT = 60_000
 FILE_TYPES = {'txt': 'text/plain', 'md': 'text/plain', 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'pdf': 'application/pdf'}
 
 
@@ -663,9 +662,14 @@ def chat():
         enabled = bool(conn.execute('SELECT memory_enabled FROM account').fetchone()[0])
         ids = list(attachment_ids)
         if not ids and history_rows:
-            latest = conn.execute('SELECT m.message_id FROM message_files m JOIN messages s ON s.id=m.message_id WHERE m.message_id>=? ORDER BY m.message_id DESC LIMIT 1', (history_rows[-1]['id'],)).fetchone()
+            latest = conn.execute('SELECT m.message_id FROM message_files m JOIN messages s ON s.id=m.message_id ORDER BY m.message_id DESC LIMIT 1').fetchone()
             if latest:
                 ids = [x[0] for x in conn.execute('SELECT attachment_id FROM message_files WHERE message_id=?', (latest[0],)).fetchall()]
+        if not attachment_ids:
+            named = conn.execute('SELECT id,name FROM attachments').fetchall()
+            for item in named:
+                if item['name'] in text and item['id'] not in ids:
+                    ids.append(item['id'])
         files = []
         for file_id in ids:
             item = conn.execute('SELECT id,name,text,read_error FROM attachments WHERE id=?', (file_id,)).fetchone()
@@ -687,8 +691,8 @@ def chat():
     document_context = ''
     if files:
         # 有附件时直接检索；后续聊天由模型结合上下文判断是否需要文件。
-        use_files = bool(attachment_ids)
-        full_summary = any(word in text for word in ('总结', '概括', '摘要', '全文', '概述'))
+        use_files = bool(attachment_ids) or any(item['name'] in text for item in files)
+        full_summary = not text or any(word in text for word in ('总结', '概括', '摘要', '全文', '概述'))
         query = text or '文件的主要内容'
         if not use_files:
             try:
