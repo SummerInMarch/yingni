@@ -10,6 +10,9 @@ import secrets
 import sqlite3
 import time
 import zipfile
+import wave
+
+import voice
 from functools import wraps
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -29,11 +32,11 @@ ROOT = Path(os.environ.get('YINGNI_DATA', './data')).resolve()
 ROOT.mkdir(parents=True, exist_ok=True)
 (ROOT / 'images').mkdir(exist_ok=True)
 (ROOT / 'files').mkdir(exist_ok=True)
+(ROOT / 'audio').mkdir(exist_ok=True)
 app = Flask(__name__, static_folder=None)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
 attempts = {}
 avatar_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='yingni-avatar')
-AVATAR_INTERVAL = 7 * 24 * 60 * 60
 CLIENT = Path(__file__).resolve().parent.parent / 'client'
 
 
@@ -70,6 +73,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS templates (id TEXT PRIMARY KEY, name TEXT NOT NULL, refs TEXT NOT NULL, created INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, name TEXT NOT NULL, media TEXT NOT NULL, size INTEGER NOT NULL, text TEXT NOT NULL, read_error TEXT NOT NULL, created INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS message_files (message_id INTEGER NOT NULL, attachment_id TEXT NOT NULL, PRIMARY KEY(message_id, attachment_id));
+        CREATE TABLE IF NOT EXISTS voice_files (id TEXT PRIMARY KEY, media TEXT NOT NULL, created INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS message_voice (message_id INTEGER PRIMARY KEY, voice_id TEXT NOT NULL);
         ''')
 
 
@@ -183,7 +188,8 @@ def messages():
         result = []
         for row in reversed(rows):
             attached = conn.execute('SELECT a.id,a.name,a.size,a.read_error FROM attachments a JOIN message_files m ON m.attachment_id=a.id WHERE m.message_id=? ORDER BY a.created', (row['id'],)).fetchall()
-            result.append({'role': row['role'], 'content': row['content'], 'created': row['created'], 'attachments': [dict(x) for x in attached]})
+            audio = conn.execute('SELECT voice_id FROM message_voice WHERE message_id=?', (row['id'],)).fetchone()
+            result.append({'role': row['role'], 'content': row['content'], 'created': row['created'], 'attachments': [dict(x) for x in attached], 'voice_id': audio[0] if audio else ''})
     return jsonify(messages=result, memory_enabled=bool(enabled), name=name[0] if name else '诺诺')
 
 
@@ -376,6 +382,7 @@ def avatar_version():
 
 def consider_avatar(history, name):
     """诺诺在对话后自行判断；生成失败不覆盖现有头像。"""
+    start_time = int(time.time())
     try:
         with db() as conn:
             has_avatar = bool(conn.execute("SELECT value FROM state WHERE key='nono_avatar' AND value != ''").fetchone())
@@ -395,10 +402,6 @@ def consider_avatar(history, name):
         if not isinstance(prompt, str) or not prompt.strip():
             app.logger.warning('诺诺头像生成：模型未提供头像描述')
             return
-        with db() as conn:
-            last = conn.execute("SELECT value FROM state WHERE key='nono_avatar_changed'").fetchone()
-        if last and time.time() - int(last[0]) < AVATAR_INTERVAL:
-            return
         raw = make_image(f'聊天头像，圆形裁剪构图，角色居中，不包含文字。{prompt[:600]}', [])
         if not raw or len(raw) > 12_000_000:
             app.logger.warning('诺诺头像生成：图片为空或超过保存限制')
@@ -407,7 +410,7 @@ def consider_avatar(history, name):
         with db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             last = conn.execute("SELECT value FROM state WHERE key='nono_avatar_changed'").fetchone()
-            if last and time.time() - int(last[0]) < AVATAR_INTERVAL:
+            if last and int(last[0]) >= start_time:
                 return
             conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar', ?)", (avatar,))
             conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar_description', ?)", (prompt[:600],))
@@ -425,7 +428,7 @@ def schedule_avatar_decision(history, name, initial_only=False):
             return
         rows = conn.execute("SELECT key,value FROM state WHERE key IN ('nono_avatar_changed','nono_avatar_next_check')").fetchall()
         values = {row['key']: int(row['value']) for row in rows}
-        if now - values.get('nono_avatar_changed', 0) < AVATAR_INTERVAL or now < values.get('nono_avatar_next_check', 0):
+        if now < values.get('nono_avatar_next_check', 0):
             return
         conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar_next_check', ?)", (str(now + 3600),))
     avatar_executor.submit(consider_avatar, history, name)
@@ -472,6 +475,65 @@ def nono_profile():
     return jsonify(profile=get_nono_profile())
 
 
+@app.post('/voice/clone')
+@authenticated
+def clone_voice():
+    upload = request.files.get('file')
+    if not upload or not upload.filename:
+        return jsonify(error='请选择参考录音'), 400
+    kind = upload.filename.rsplit('.', 1)[-1].lower()
+    media = {'wav': 'audio/wav', 'mp3': 'audio/mpeg', 'm4a': 'audio/mp4'}.get(kind)
+    raw = upload.stream.read(10_000_001)
+    if not media or not raw or len(raw) > 10_000_000:
+        return jsonify(error='请选择不超过 10 MB 的 WAV、MP3 或 M4A 录音'), 400
+    try:
+        voice_id = voice.clone(raw, media)
+        with db() as conn:
+            conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_voice', ?)", (voice_id,))
+        return jsonify(ok=True)
+    except (RuntimeError, requests.RequestException, KeyError, ValueError, TypeError):
+        return jsonify(error='音色创建失败，请检查录音和语音服务配置'), 502
+
+
+def save_voice(raw, media):
+    voice_id = secrets.token_hex(16)
+    path = ROOT / 'audio' / voice_id
+    path.write_bytes(raw)
+    try:
+        with db() as conn:
+            conn.execute('INSERT INTO voice_files VALUES (?,?,?)', (voice_id, media, int(time.time())))
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return voice_id
+
+
+@app.post('/voice/transcribe')
+@authenticated
+def transcribe_voice():
+    upload = request.files.get('file')
+    raw = upload.stream.read(5_000_001) if upload else b''
+    if not raw or len(raw) > 5_000_000 or not raw.startswith(b'\x1a\x45\xdf\xa3'):
+        return jsonify(error='语音格式不支持或录音过大'), 400
+    try:
+        text = voice.transcribe(raw, 'audio/webm')
+        return jsonify(text=text, voice_id=save_voice(raw, 'audio/webm'))
+    except (RuntimeError, requests.RequestException, KeyError, ValueError, TypeError):
+        return jsonify(error='语音识别失败，请稍后重试'), 502
+
+
+@app.get('/voice/<voice_id>')
+@authenticated
+def get_voice(voice_id):
+    if not re.fullmatch(r'[a-f0-9]{32}', voice_id):
+        abort(404)
+    with db() as conn:
+        row = conn.execute('SELECT media FROM voice_files WHERE id=?', (voice_id,)).fetchone()
+    path = ROOT / 'audio' / voice_id
+    if not row or not path.is_file(): abort(404)
+    return send_file(path, mimetype=row['media'], max_age=0)
+
+
 @app.post('/memory-setting')
 @authenticated
 def memory_setting():
@@ -487,7 +549,12 @@ def forget_all():
     with db() as conn:
         conn.execute('DELETE FROM messages')
         conn.execute('DELETE FROM message_files')
+        voice_rows = conn.execute('SELECT id FROM voice_files').fetchall()
+        conn.execute('DELETE FROM message_voice')
+        conn.execute('DELETE FROM voice_files')
         conn.execute("DELETE FROM state WHERE key IN ('memory','nono_name')")
+    for item in voice_rows:
+        (ROOT / 'audio' / item['id']).unlink(missing_ok=True)
     return jsonify(ok=True)
 
 
@@ -497,12 +564,18 @@ def chat():
     received_at = int(time.time())
     body = data()
     text = str(body.get('message', '')).strip()
+    voice_id = body.get('voice_id', '')
+    if not isinstance(voice_id, str) or (voice_id and not re.fullmatch(r'[a-f0-9]{32}', voice_id)):
+        return jsonify(error='语音消息不正确'), 400
     attachment_ids = body.get('attachments', [])
     if not isinstance(attachment_ids, list) or len(attachment_ids) > 3 or any(not isinstance(x, str) or not re.fullmatch(r'[a-f0-9]{32}', x) for x in attachment_ids) or len(set(attachment_ids)) != len(attachment_ids):
         return jsonify(error='每条消息最多选择 3 个不同文件'), 400
     if (not text and not attachment_ids) or len(text) > 4000:
         return jsonify(error='请输入不超过 4000 字的消息'), 400
     with db() as conn:
+        if voice_id and not conn.execute('SELECT 1 FROM voice_files WHERE id=?', (voice_id,)).fetchone():
+            return jsonify(error='录音不存在，请重新录制'), 400
+        voice_row = conn.execute("SELECT value FROM state WHERE key='nono_voice'").fetchone()
         history_rows = conn.execute('SELECT id,role,content,created FROM messages ORDER BY id DESC LIMIT 30').fetchall()
         row = conn.execute("SELECT value FROM state WHERE key='memory'").fetchone()
         name_row = conn.execute("SELECT value FROM state WHERE key='nono_name'").fetchone()
@@ -528,6 +601,7 @@ def chat():
     system = (f'你是{name}，用户的AI朋友，活泼自然、有自己的判断，像朋友一样交流，不刻意附和。'
               '你可以自然表达自己的偏好。不要声称已删除信息；如用户希望遗忘，引导使用设置里的清除聊天和记忆。'
               f"你的个人资料：姓名={name}；签名={profile['signature'] or '暂未设置'}；模拟心情={profile['mood']}；头像={avatar_note}。"
+              '回复长度要自然变化：日常寒暄简短，需要深入交流时可以较长，不要每次都写成大段。'
               '你可以决定自己的姓名和个性签名，系统也会定期询问你是否更换头像。不要声称已经修改，除非你明确决定修改。'
               '对话中的时间均为北京时间，请结合时间和内容自然判断是否延续之前的话题，不要仅因间隔长而强制换话题。'
               '已授权的长期记忆：' + memory)
@@ -543,11 +617,21 @@ def chat():
         reply = deepseek([{'role': 'system', 'content': system}] + list(reversed(history)) + file_messages + [{'role': 'user', 'content': f"[北京时间 {beijing_time(received_at)}] {text or '用户发送了文件。'}"}])
     except (requests.RequestException, RuntimeError, KeyError, ValueError):
         return jsonify(error='诺诺暂时没有连上，请稍后重试'), 502
+    reply_voice = ''
+    # 只为短回复随机生成语音；实际超过 20 秒则退回文字。
+    if voice_row and len(reply) <= 100 and secrets.randbelow(2) == 0:
+        try:
+            speech, duration = voice.synthesize(re.sub(r'[*#_`]', '', reply), voice_row[0])
+            if 0 < duration <= 20: reply_voice = save_voice(speech, 'audio/wav')
+        except (RuntimeError, requests.RequestException, KeyError, ValueError, TypeError, wave.Error, EOFError):
+            app.logger.warning('语音合成未完成，使用文字回复')
     reply_at = int(time.time())
     with db() as conn:
         cursor = conn.execute('INSERT INTO messages(role,content,created) VALUES (?,?,?)', ('user', text, received_at))
         conn.executemany('INSERT INTO message_files(message_id,attachment_id) VALUES (?,?)', [(cursor.lastrowid, file_id) for file_id in attachment_ids])
-        conn.execute('INSERT INTO messages(role,content,created) VALUES (?,?,?)', ('assistant', reply, reply_at))
+        if voice_id: conn.execute('INSERT INTO message_voice VALUES (?,?)', (cursor.lastrowid, voice_id))
+        cursor = conn.execute('INSERT INTO messages(role,content,created) VALUES (?,?,?)', ('assistant', reply, reply_at))
+        if reply_voice: conn.execute('INSERT INTO message_voice VALUES (?,?)', (cursor.lastrowid, reply_voice))
     # 资料和心情独立于长期记忆开关。
     try:
         summary = deepseek([{'role': 'system', 'content': '输出JSON，包含memory、name、signature、mood字符串。memory保留原有记忆，增补本次明确值得记住的稳定偏好和经历，不保存敏感信息。只有AI在本次回复明确主动决定修改姓名或个性签名时才更新相应字段，否则保留原值。mood结合本次聊天从平静、开心、期待、放松、低落中选择。'}, {'role': 'user', 'content': f"原名：{name}\n原签名：{profile['signature']}\n原心情：{profile['mood']}\n原记忆：{memory}\n用户：{text}\nAI：{reply}"}], True)
@@ -573,7 +657,7 @@ def chat():
     except (requests.RequestException, RuntimeError, KeyError, ValueError, AttributeError, TypeError):
         app.logger.warning('诺诺资料更新未完成')
     schedule_avatar_decision(list(reversed(history[:10])) + [{'role': 'user', 'content': text}, {'role': 'assistant', 'content': reply}], name, initial_only=True)
-    return jsonify(reply=reply, name=name, user_created=received_at, reply_created=reply_at)
+    return jsonify(reply=reply, name=name, user_created=received_at, reply_created=reply_at, voice_id=reply_voice)
 
 
 def get_memory():

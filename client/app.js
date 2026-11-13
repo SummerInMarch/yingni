@@ -5,6 +5,7 @@ let firstUse = false, count = 4, refs = [], memoryEnabled = false;
 let selectedStyle = '动漫日常';
 let userAvatar = '', nonoAvatar = '', avatarChanged = 0;
 let selectedFiles = [];
+let recordedVoice = '';
 let toastTimer;
 
 function toast(message) {
@@ -79,7 +80,7 @@ function formatChatTime(timestamp) {
   const value = type => parts.find(part => part.type === type).value;
   return `${value('year')}-${value('month')}-${value('day')} ${value('hour')}:${value('minute')}`;
 }
-function addMessage(role, content, attachments = [], created = null) {
+function addMessage(role, content, attachments = [], created = null, voiceId = '') {
   const row = document.createElement('div'); row.className = 'message-row' + (role === 'user' ? ' mine' : '');
   const avatar = document.createElement('span'); avatar.className = 'avatar ' + (role === 'user' ? 'avatar-user' : 'avatar-nono');
   const source = role === 'user' ? userAvatar : nonoAvatar;
@@ -93,6 +94,7 @@ function addMessage(role, content, attachments = [], created = null) {
     item.textContent = `📎 ${displayFileName(file.name)}${file.read_error ? '（暂不能阅读）' : ''}`;
     item.onclick = () => downloadDocument(file); bubble.append(item);
   });
+  if (voiceId) { const play = document.createElement('button'); play.type = 'button'; play.className = 'message-file voice-play'; play.textContent = '▶ 播放语音'; play.onclick = () => playVoice(voiceId); bubble.append(play); }
   if (created) { const time = document.createElement('time'); time.className = 'message-time'; time.dateTime = new Date(created * 1000).toISOString(); time.textContent = formatChatTime(created); bubble.append(time); }
   row.append(bubble); $('#messages').append(row);
   if (role === 'user') row.append(avatar);
@@ -100,17 +102,62 @@ function addMessage(role, content, attachments = [], created = null) {
 async function loadMessages() {
   try { const [data, appearance] = await Promise.all([api('messages'), api('appearance')]); applyAppearance(appearance); memoryEnabled = data.memory_enabled; $('.chat-heading strong').textContent = data.name; $('#messages').replaceChildren();
     if (!data.messages.length) addMessage('assistant', '嗨，我是诺诺。今天的你，过得怎么样？');
-    data.messages.forEach(m => addMessage(m.role, m.content, m.attachments || [], m.created)); window.scrollTo(0, document.body.scrollHeight);
+    data.messages.forEach(m => addMessage(m.role, m.content, m.attachments || [], m.created, m.voice_id)); window.scrollTo(0, document.body.scrollHeight);
     if (!nonoAvatar) api('avatar-initialize', 'POST').catch(() => {});
   } catch(e) { toast(e.message); }
 }
 $('#chat-form').addEventListener('submit', async event => {
   event.preventDefault(); const input = $('#chat-input'), text = input.value.trim(); if (!text && !selectedFiles.length) return;
-  const attachments = [...selectedFiles], message = text;
-  input.value = ''; addMessage('user', message, attachments, Math.floor(Date.now() / 1000)); $('#send').disabled = true; window.scrollTo(0, document.body.scrollHeight);
-  try { const result = await api('chat', 'POST', {message, attachments: attachments.map(f => f.id)}); selectedFiles = []; renderSelectedFiles(); $('.chat-heading strong').textContent = result.name; const sentTime = $('#messages .mine:last-of-type .message-time'); if (sentTime && result.user_created) { sentTime.dateTime = new Date(result.user_created * 1000).toISOString(); sentTime.textContent = formatChatTime(result.user_created); } addMessage('assistant', result.reply, [], result.reply_created); window.scrollTo(0, document.body.scrollHeight); }
+  const attachments = [...selectedFiles], message = text, voiceId = recordedVoice;
+  input.value = ''; addMessage('user', message, attachments, Math.floor(Date.now() / 1000), voiceId); $('#send').disabled = true; window.scrollTo(0, document.body.scrollHeight);
+  try { const result = await api('chat', 'POST', {message, attachments: attachments.map(f => f.id), voice_id: voiceId}); selectedFiles = []; recordedVoice = ''; updateRecordingHint(); renderSelectedFiles(); $('.chat-heading strong').textContent = result.name; const sentTime = $('#messages .mine:last-of-type .message-time'); if (sentTime && result.user_created) { sentTime.dateTime = new Date(result.user_created * 1000).toISOString(); sentTime.textContent = formatChatTime(result.user_created); } addMessage('assistant', result.reply, [], result.reply_created, result.voice_id); window.scrollTo(0, document.body.scrollHeight); }
   catch(e) { toast(e.message || '发送失败'); input.value = text; await loadMessages(); } finally { $('#send').disabled = false; }
 });
+
+// 语音仅在用户主动录制时使用麦克风，并在发送前展示识别文字。
+let recorder = null, voiceChunks = [], recordingTimer = null, playingAudio = null, playingUrl = '';
+const voiceButton = document.createElement('button'); voiceButton.type = 'button'; voiceButton.className = 'attachment-button'; voiceButton.textContent = '🎙'; voiceButton.setAttribute('aria-label', '录制语音');
+$('#chat-form').insertBefore(voiceButton, $('#send'));
+const recordingHint = document.createElement('button'); recordingHint.type = 'button'; recordingHint.className = 'file-chip'; recordingHint.hidden = true;
+$('.chat-composer').insertBefore(recordingHint, $('#chat-form'));
+function updateRecordingHint() { recordingHint.hidden = !recordedVoice; recordingHint.textContent = '🎙 已录制语音 ×'; }
+recordingHint.onclick = () => { recordedVoice = ''; updateRecordingHint(); };
+async function playVoice(id) {
+  try {
+    if (playingAudio) playingAudio.pause(); if (playingUrl) URL.revokeObjectURL(playingUrl);
+    const response = await fetch(`voice/${id}`, {headers:{Authorization:`Bearer ${access}`}});
+    if (!response.ok) throw new Error('语音暂时无法播放');
+    playingUrl = URL.createObjectURL(await response.blob()); playingAudio = new Audio(playingUrl); await playingAudio.play();
+    playingAudio.onended = () => { URL.revokeObjectURL(playingUrl); playingUrl = ''; playingAudio = null; };
+  } catch (error) { toast(error.message || '语音播放失败'); }
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden && recorder?.state === 'recording') recorder.stop(); });
+voiceButton.onclick = async () => {
+  if (recorder && recorder.state === 'recording') { recorder.stop(); return; }
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder || !MediaRecorder.isTypeSupported('audio/webm')) return toast('请安装支持录音的新版映你');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    recorder = new MediaRecorder(stream, {mimeType:'audio/webm'}); voiceChunks = [];
+    recorder.ondataavailable = event => { if (event.data.size) voiceChunks.push(event.data); };
+    recorder.onstop = async () => {
+      clearTimeout(recordingTimer); stream.getTracks().forEach(track => track.stop()); voiceButton.textContent = '🎙';
+      const form = new FormData(); form.append('file', new Blob(voiceChunks, {type:'audio/webm'}), 'voice.webm'); busy('正在识别语音…');
+      try { const response = await fetch('voice/transcribe', {method:'POST', headers:{Authorization:`Bearer ${access}`}, body:form}); const result = await response.json(); if (!response.ok) throw new Error(result.error || '语音识别失败'); recordedVoice = result.voice_id; $('#chat-input').value = result.text; updateRecordingHint(); }
+      catch (error) { toast(error.message || '语音识别失败'); } finally { busy(); recorder = null; }
+    };
+    recorder.start(); voiceButton.textContent = '■'; recordingTimer = setTimeout(() => { if (recorder?.state === 'recording') recorder.stop(); }, 60000); toast('开始录音，再点一次结束');
+  } catch { toast('无法录音，请检查麦克风权限'); }
+};
+const voiceControl = document.createElement('button'); voiceControl.type = 'button'; voiceControl.textContent = '♫　设置诺诺的声音（上传 10–20 秒录音）';
+const voiceSample = document.createElement('input'); voiceSample.type = 'file'; voiceSample.accept = '.wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4'; voiceSample.hidden = true;
+$('.profile-list').append(voiceControl); $('.profile-body').append(voiceSample); voiceControl.onclick = () => voiceSample.click();
+voiceSample.onchange = async () => {
+  const file = voiceSample.files[0]; voiceSample.value = ''; if (!file) return;
+  if (file.size > 10_000_000 || !/\.(wav|mp3|m4a)$/i.test(file.name)) return toast('请选择不超过 10 MB 的 WAV、MP3 或 M4A 录音');
+  const form = new FormData(); form.append('file', file); busy('正在创建诺诺的声音…');
+  try { const response = await fetch('voice/clone', {method:'POST', headers:{Authorization:`Bearer ${access}`}, body:form}); const result = await response.json(); if (!response.ok) throw new Error(result.error || '声音创建失败'); toast('诺诺的声音已设置'); }
+  catch (error) { toast(error.message || '声音创建失败'); } finally { busy(); }
+};
 
 // 诺诺资料由她自己维护，聊天标题可打开查看。
 const nonoPage = document.createElement('section'); nonoPage.className = 'screen'; nonoPage.id = 'nono-profile';
@@ -276,7 +323,7 @@ avatarInput.onchange = async () => {
   try { const result = await api('appearance', 'POST', {user_avatar: await prepareAvatar(file)}); applyAppearance(result); toast('头像已保存'); }
   catch (e) { toast(e.message || '头像保存失败'); } finally { avatarInput.value = ''; }
 };
-const nonoInfo = document.createElement('div'); nonoInfo.className = 'appearance-note'; nonoInfo.textContent = '✳ 诺诺会自己决定头像，最多每 7 天更换一次';
+const nonoInfo = document.createElement('div'); nonoInfo.className = 'appearance-note'; nonoInfo.textContent = '✳ 诺诺每周会自己决定是否更换头像';
 avatarControl.after(nonoInfo);
 const themeControl = document.createElement('button'); themeControl.type = 'button';
 themeControl.append(document.createTextNode('◈　App 主题'), document.createElement('span'));

@@ -1,6 +1,9 @@
 package com.yingni.app;
 
 import android.app.Activity;
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.webkit.PermissionRequest;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
@@ -24,6 +27,7 @@ public class MainActivity extends Activity {
     private static final String SETUP_TOKEN = "__SETUP_TOKEN__";
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
+    private PermissionRequest microphoneRequest;
     private String pendingPath;
     private String pendingToken;
 
@@ -47,6 +51,24 @@ public class MainActivity extends Activity {
             }
         });
         web.setWebChromeClient(new WebChromeClient() {
+            @Override public void onPermissionRequest(PermissionRequest request) {
+                runOnUiThread(() -> {
+                    Uri origin = request.getOrigin();
+                    String[] resources = request.getResources();
+                    if (!"https".equals(origin.getScheme()) || !"home.samoyeai.com".equals(origin.getHost()) ||
+                            resources.length != 1 || !PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resources[0]) || microphoneRequest != null) {
+                        request.deny(); return;
+                    }
+                    if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        request.grant(resources); return;
+                    }
+                    microphoneRequest = request;
+                    requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 43);
+                });
+            }
+            @Override public void onPermissionRequestCanceled(PermissionRequest request) {
+                runOnUiThread(() -> { if (microphoneRequest == request) microphoneRequest = null; });
+            }
             @Override public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (fileCallback != null) fileCallback.onReceiveValue(null);
                 fileCallback = callback;
@@ -56,6 +78,15 @@ public class MainActivity extends Activity {
         });
         setContentView(web);
         web.loadUrl(HOME);
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == 43 && microphoneRequest != null) {
+            PermissionRequest request = microphoneRequest; microphoneRequest = null;
+            if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) request.grant(new String[]{PermissionRequest.RESOURCE_AUDIO_CAPTURE});
+            else request.deny();
+        }
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {

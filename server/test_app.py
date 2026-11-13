@@ -112,6 +112,22 @@ class AppTest(unittest.TestCase):
         with patch.object(app.avatar_executor, 'submit') as submit:
             app.schedule_avatar_decision([], '诺诺', initial_only=True)
             submit.assert_not_called()
+        with patch.object(app.voice, 'clone', return_value='cosyvoice-v3.5-flash-yingni-test'):
+            clone = client.post('/voice/clone', headers=headers, data={'file': (io.BytesIO(b'voice sample'), 'sample.wav')}, content_type='multipart/form-data')
+            self.assertEqual(clone.status_code, 200)
+        with patch.object(app.voice, 'transcribe', return_value='你好吗'):
+            recording = client.post('/voice/transcribe', headers=headers, data={'file': (io.BytesIO(b'\x1a\x45\xdf\xa3voice'), 'voice.webm')}, content_type='multipart/form-data')
+            self.assertEqual(recording.status_code, 200)
+        voice_id = recording.json['voice_id']
+        with patch.object(app, 'deepseek', side_effect=['你好呀', '{"memory":"","name":"诺诺"}']), patch.object(app, 'schedule_avatar_decision'), patch.object(app.secrets, 'randbelow', return_value=0), patch.object(app.voice, 'synthesize', return_value=(b'test wav', 2)):
+            spoken = client.post('/chat', headers=headers, json={'message': recording.json['text'], 'voice_id': voice_id})
+            self.assertTrue(spoken.json['voice_id'])
+        spoken_audio = client.get('/voice/' + spoken.json['voice_id'], headers=headers)
+        self.assertEqual(spoken_audio.data, b'test wav'); spoken_audio.close()
+        self.assertEqual(client.get('/voice/' + voice_id).status_code, 401)
+        self.assertEqual(client.get('/messages', headers=headers).json['messages'][-2]['voice_id'], voice_id)
+        with patch.object(app, 'deepseek', side_effect=['很长的语音', '{"memory":"","name":"诺诺"}']), patch.object(app, 'schedule_avatar_decision'), patch.object(app.secrets, 'randbelow', return_value=0), patch.object(app.voice, 'synthesize', return_value=(b'test wav', 21)):
+            self.assertFalse(client.post('/chat', headers=headers, json={'message': '继续说'}).json['voice_id'])
         with patch.object(app, 'deepseek', return_value='{"scenes":["第一幕","第二幕"]}'), patch.object(app, 'make_image', return_value=b'fake image'):
             generated = client.post('/generate', headers=headers, json={'story': '测试故事', 'count': 2, 'refs': []})
             self.assertEqual(generated.status_code, 200)

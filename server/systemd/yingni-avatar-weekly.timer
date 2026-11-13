@@ -2,7 +2,8 @@
 Description=诺诺每周选择头像
 
 [Timer]
-OnCalendar=Mon *-*-* 10:00:00 Asia/Shanghai
+OnCalendar=Mon *-*-* 00:00:00 Asia/Shanghai
+RandomizedDelaySec=7d
 Persistent=true
 
 [Install]
