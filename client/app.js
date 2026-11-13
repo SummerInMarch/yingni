@@ -3,6 +3,7 @@ const $ = s => document.querySelector(s);
 let access = localStorage.getItem('yingni_token') || '';
 let firstUse = false, count = 4, refs = [], memoryEnabled = false;
 let selectedStyle = '动漫日常';
+let userAvatar = '', nonoAvatar = '', avatarChanged = 0;
 let toastTimer;
 
 function toast(message) {
@@ -33,7 +34,7 @@ async function start() {
     $('#auth-subtitle').textContent = firstUse ? '首次使用，请设置手机号和密码。手机号仅作登录标识，暂不验证。' : '登录，继续你的故事。';
     $('#auth-submit').textContent = firstUse ? '创建账号 ↗' : '登录 ↗';
     $('#consent-wrap').hidden = !firstUse;
-    if (access && !firstUse) { const x = await api('messages'); memoryEnabled = x.memory_enabled; screen('home'); }
+    if (access && !firstUse) { const [x, appearance] = await Promise.all([api('messages'), api('appearance')]); memoryEnabled = x.memory_enabled; applyAppearance(appearance); screen('home'); }
   } catch (e) { toast(e.message || '网络连接失败'); }
 }
 $('#auth-form').addEventListener('submit', async event => {
@@ -44,17 +45,22 @@ $('#auth-form').addEventListener('submit', async event => {
     const result = await api(firstUse ? 'setup' : 'login', 'POST', body);
     access = result.token; localStorage.setItem('yingni_token', access);
     memoryEnabled = firstUse ? $('#consent').checked : result.memory_enabled;
-    $('#password').value = ''; firstUse = false; screen('home');
+    $('#password').value = ''; firstUse = false; applyAppearance(await api('appearance')); screen('home');
   } catch(e) { toast(e.message || '网络连接失败'); } finally { busy(); }
 });
 document.querySelectorAll('[data-go]').forEach(x => x.addEventListener('click', () => screen(x.dataset.go)));
 function addMessage(role, content) {
   const row = document.createElement('div'); row.className = 'message-row' + (role === 'user' ? ' mine' : '');
-  if (role !== 'user') { const avatar = document.createElement('span'); avatar.className = 'avatar'; avatar.textContent = '◡'; row.append(avatar); }
+  const avatar = document.createElement('span'); avatar.className = 'avatar ' + (role === 'user' ? 'avatar-user' : 'avatar-nono');
+  const source = role === 'user' ? userAvatar : nonoAvatar;
+  if (source) { const image = document.createElement('img'); image.src = source; image.alt = role === 'user' ? '我的头像' : '诺诺的头像'; avatar.append(image); }
+  else avatar.textContent = role === 'user' ? '我' : '◡';
+  if (role !== 'user') row.append(avatar);
   const bubble = document.createElement('div'); bubble.className = 'bubble'; bubble.textContent = content; row.append(bubble); $('#messages').append(row);
+  if (role === 'user') row.append(avatar);
 }
 async function loadMessages() {
-  try { const data = await api('messages'); memoryEnabled = data.memory_enabled; $('.chat-heading strong').textContent = data.name; $('#messages').replaceChildren();
+  try { const [data, appearance] = await Promise.all([api('messages'), api('appearance')]); applyAppearance(appearance); memoryEnabled = data.memory_enabled; $('.chat-heading strong').textContent = data.name; $('#messages').replaceChildren();
     if (!data.messages.length) addMessage('assistant', '嗨，我是诺诺。今天的你，过得怎么样？');
     data.messages.forEach(m => addMessage(m.role, m.content)); window.scrollTo(0, document.body.scrollHeight);
   } catch(e) { toast(e.message); }
@@ -77,6 +83,87 @@ document.querySelectorAll('.style-option').forEach(button => button.addEventList
 $('#minus').onclick = () => { count = Math.max(1, count - 1); $('#count').textContent = count; };
 $('#plus').onclick = () => { count = Math.min(6, count + 1); $('#count').textContent = count; };
 function readFile(file) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file); }); }
+const themes = [{id:'sage', name:'清新绿'}, {id:'peach', name:'暖杏色'}, {id:'blue', name:'宁静蓝'}];
+let currentTheme = 'sage';
+function setAvatar(element, source, fallback) {
+  element.replaceChildren();
+  if (source) { const img = document.createElement('img'); img.src = source; img.alt = ''; element.append(img); }
+  else element.textContent = fallback;
+}
+function blendWithWhite(color, amount) {
+  const parts = [1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16));
+  return '#' + parts.map(n => Math.round(n + (255 - n) * amount).toString(16).padStart(2, '0')).join('');
+}
+function applyAppearance(settings) {
+  userAvatar = settings.user_avatar; nonoAvatar = settings.nono_avatar;
+  avatarChanged = settings.avatar_changed; currentTheme = settings.theme;
+  const phone = $('.phone');
+  phone.classList.remove('theme-sage', 'theme-peach', 'theme-blue', 'theme-custom');
+  phone.classList.add(`theme-${currentTheme}`);
+  ['--page','--accent','--accent-text','--highlight','--tint','--secondary'].forEach(key => phone.style.removeProperty(key));
+  if (currentTheme === 'custom') {
+    const color = settings.custom_color;
+    phone.style.setProperty('--page', blendWithWhite(color, 0.96));
+    phone.style.setProperty('--accent', color);
+    const rgb = [1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16));
+    phone.style.setProperty('--accent-text', (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) / 1000 > 160 ? '#26322e' : '#ffffff');
+    phone.style.setProperty('--highlight', color);
+    phone.style.setProperty('--tint', blendWithWhite(color, 0.80));
+    phone.style.setProperty('--secondary', blendWithWhite(color, 0.88));
+  }
+  const chat = $('#chat');
+  chat.style.backgroundImage = settings.chat_background ? `linear-gradient(#ffffff88,#ffffff88),url("${settings.chat_background}")` : '';
+  document.querySelectorAll('.avatar-user').forEach(x => setAvatar(x, userAvatar, '我'));
+  document.querySelectorAll('.avatar-nono, .mini-face').forEach(x => setAvatar(x, nonoAvatar, '◡'));
+  themeControl.lastChild.textContent = themes.find(t => t.id === currentTheme)?.name || '自定义';
+}
+// 头像通过账号保存，重新登录后仍可使用。
+const avatarControl = document.createElement('button');
+avatarControl.type = 'button'; avatarControl.textContent = '☻　设置我的头像';
+const avatarInput = document.createElement('input');
+avatarInput.type = 'file'; avatarInput.accept = 'image/jpeg,image/png,image/webp'; avatarInput.hidden = true;
+$('.profile-list').prepend(avatarControl); $('.profile-body').append(avatarInput);
+avatarControl.onclick = () => avatarInput.click();
+avatarInput.onchange = async () => {
+  const file = avatarInput.files[0]; if (!file) return;
+  if (file.size > 2_000_000 || !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { toast('请选择不超过 2 MB 的 JPG、PNG 或 WebP 图片'); avatarInput.value = ''; return; }
+  try { const result = await api('appearance', 'POST', {user_avatar: await readFile(file)}); applyAppearance(result); toast('头像已保存'); }
+  catch (e) { toast(e.message || '头像保存失败'); } finally { avatarInput.value = ''; }
+};
+const nonoInfo = document.createElement('div'); nonoInfo.className = 'appearance-note'; nonoInfo.textContent = '✳ 诺诺会自己决定头像，最多每 7 天更换一次';
+avatarControl.after(nonoInfo);
+const themeControl = document.createElement('button'); themeControl.type = 'button';
+themeControl.append(document.createTextNode('◈　App 主题'), document.createElement('span'));
+$('.profile-list').insertBefore(themeControl, $('#memory-toggle'));
+themeControl.onclick = async () => {
+  const index = themes.findIndex(x => x.id === currentTheme), next = themes[(index + 1) % themes.length];
+  try { applyAppearance(await api('appearance', 'POST', {theme: next.id})); toast(`已切换到${next.name}`); } catch(e) { toast(e.message); }
+};
+const colorControl = document.createElement('button'); colorControl.type = 'button'; colorControl.textContent = '◉　自定义主题颜色';
+const colorInput = document.createElement('input'); colorInput.type = 'color'; colorInput.value = '#779676'; colorInput.className = 'color-input'; colorInput.setAttribute('aria-label', '选择主题颜色');
+$('.profile-list').insertBefore(colorControl, $('#memory-toggle')); $('.profile-body').append(colorInput);
+colorControl.onclick = () => colorInput.click();
+colorInput.onchange = async () => {
+  try { applyAppearance(await api('appearance', 'POST', {theme: 'custom', custom_color: colorInput.value})); toast('自定义主题已保存'); } catch(e) { toast(e.message); }
+};
+const backgroundControl = document.createElement('button'); backgroundControl.type = 'button'; backgroundControl.textContent = '▧　设置聊天背景';
+const backgroundInput = document.createElement('input'); backgroundInput.type = 'file'; backgroundInput.accept = 'image/jpeg,image/png,image/webp'; backgroundInput.hidden = true;
+$('.profile-list').insertBefore(backgroundControl, $('#memory-toggle')); $('.profile-body').append(backgroundInput);
+backgroundControl.onclick = () => backgroundInput.click();
+backgroundInput.onchange = async () => {
+  const file = backgroundInput.files[0]; if (!file) return;
+  if (file.size > 4_000_000 || !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { toast('请选择不超过 4 MB 的 JPG、PNG 或 WebP 图片'); backgroundInput.value = ''; return; }
+  try { applyAppearance(await api('appearance', 'POST', {chat_background: await readFile(file)})); toast('聊天背景已保存'); }
+  catch(e) { toast(e.message || '背景保存失败'); } finally { backgroundInput.value = ''; }
+};
+const clearBackground = document.createElement('button'); clearBackground.type = 'button'; clearBackground.textContent = '↺　恢复默认聊天背景';
+$('.profile-list').insertBefore(clearBackground, $('#memory-toggle'));
+clearBackground.onclick = async () => { try { applyAppearance(await api('appearance', 'POST', {chat_background: ''})); toast('已恢复默认背景'); } catch(e) { toast(e.message); } };
+// 仅在头像变化时重新下载外观，不轮询完整图片。
+setInterval(async () => {
+  if (!access || !$('#chat').classList.contains('active')) return;
+  try { const version = await api('avatar-version'); if (version.avatar_changed !== avatarChanged) applyAppearance(await api('appearance')); } catch { /* 下次继续检查。 */ }
+}, 20000);
 $('#reference').addEventListener('change', async event => {
   const files = [...event.target.files];
   if (files.length > 4 || files.some(x => x.size > 6_000_000 || !['image/jpeg','image/png','image/webp'].includes(x.type))) { toast('请选择最多 4 张、每张不超过 6 MB 的 JPG、PNG 或 WebP'); event.target.value = ''; return; }

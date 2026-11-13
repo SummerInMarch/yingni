@@ -9,6 +9,8 @@ import secrets
 import sqlite3
 import time
 from functools import wraps
+from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -21,6 +23,8 @@ ROOT.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__, static_folder=None)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
 attempts = {}
+avatar_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='yingni-avatar')
+AVATAR_INTERVAL = 7 * 24 * 60 * 60
 CLIENT = Path(__file__).resolve().parent.parent / 'client'
 
 
@@ -34,10 +38,15 @@ def static_files(name):
     return send_from_directory(CLIENT, name)
 
 
+@contextmanager
 def db():
     conn = sqlite3.connect(ROOT / 'yingni.sqlite3', timeout=30)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -163,6 +172,110 @@ def messages():
     return jsonify(messages=[dict(r) for r in reversed(rows)], memory_enabled=bool(enabled), name=name[0] if name else '诺诺')
 
 
+def valid_image(value, max_bytes=2_000_000):
+    if not isinstance(value, str) or len(value) > max_bytes * 4 // 3 + 100:
+        return False
+    match = re.fullmatch(r'data:image/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)', value)
+    if not match:
+        return False
+    try:
+        raw = base64.b64decode(match.group(2), validate=True)
+    except ValueError:
+        return False
+    if not raw or len(raw) > max_bytes:
+        return False
+    return ((match.group(1) == 'jpeg' and raw.startswith(b'\xff\xd8\xff')) or
+            (match.group(1) == 'png' and raw.startswith(b'\x89PNG\r\n\x1a\n')) or
+            (match.group(1) == 'webp' and raw[:4] == b'RIFF' and raw[8:12] == b'WEBP'))
+
+
+@app.route('/appearance', methods=['GET', 'POST'])
+@authenticated
+def appearance():
+    body = data() if request.method == 'POST' else {}
+    if 'user_avatar' in body:
+        avatar = body['user_avatar']
+        if not isinstance(avatar, str) or (avatar and not valid_image(avatar)):
+            return jsonify(error='头像须为不超过 2 MB 的 JPG、PNG 或 WebP 图片'), 400
+    if 'chat_background' in body:
+        background = body['chat_background']
+        if not isinstance(background, str) or (background and not valid_image(background, 4_000_000)):
+            return jsonify(error='背景须为不超过 4 MB 的 JPG、PNG 或 WebP 图片'), 400
+    if 'theme' in body and body['theme'] not in ('sage', 'peach', 'blue', 'custom'):
+        return jsonify(error='主题不受支持'), 400
+    if 'custom_color' in body and (not isinstance(body['custom_color'], str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', body['custom_color'])):
+        return jsonify(error='主题颜色不正确'), 400
+    with db() as conn:
+        if request.method == 'POST':
+            if 'user_avatar' in body:
+                conn.execute("INSERT OR REPLACE INTO state VALUES ('user_avatar', ?)", (body['user_avatar'],))
+            if 'chat_background' in body:
+                conn.execute("INSERT OR REPLACE INTO state VALUES ('chat_background', ?)", (body['chat_background'],))
+            if 'theme' in body:
+                conn.execute("INSERT OR REPLACE INTO state VALUES ('theme', ?)", (body['theme'],))
+            if 'custom_color' in body:
+                conn.execute("INSERT OR REPLACE INTO state VALUES ('custom_color', ?)", (body['custom_color'],))
+        rows = conn.execute("SELECT key,value FROM state WHERE key IN ('user_avatar','nono_avatar','nono_avatar_changed','chat_background','theme','custom_color')").fetchall()
+        values = {row['key']: row['value'] for row in rows}
+    return jsonify(user_avatar=values.get('user_avatar', ''), nono_avatar=values.get('nono_avatar', ''),
+                   avatar_changed=int(values.get('nono_avatar_changed', '0')),
+                   chat_background=values.get('chat_background', ''), theme=values.get('theme', 'sage'),
+                   custom_color=values.get('custom_color', '#779676'))
+
+
+@app.get('/avatar-version')
+@authenticated
+def avatar_version():
+    with db() as conn:
+        row = conn.execute("SELECT value FROM state WHERE key='nono_avatar_changed'").fetchone()
+    return jsonify(avatar_changed=int(row[0]) if row else 0)
+
+
+def consider_avatar(history, name):
+    """诺诺在对话后自行判断；生成失败不覆盖现有头像。"""
+    try:
+        answer = deepseek([
+            {'role': 'system', 'content': '你正在决定自己的聊天头像。依据最近交流，只有你确实想换头像时才决定更换，不要为了完成任务勉强更换。输出JSON：change为布尔值，prompt为你想要的头像描述字符串（无需引用用户照片）。头像须为适合圆形裁剪的单人或角色近景，不包含文字。'},
+            {'role': 'user', 'content': f'你的名字：{name}。最近的聊天：{json.dumps(history, ensure_ascii=False)}'}
+        ], True)
+        choice = json.loads(answer)
+        if not isinstance(choice, dict):
+            return
+        prompt = choice.get('prompt')
+        if choice.get('change') is not True or not isinstance(prompt, str) or not prompt.strip():
+            return
+        with db() as conn:
+            last = conn.execute("SELECT value FROM state WHERE key='nono_avatar_changed'").fetchone()
+        if last and time.time() - int(last[0]) < AVATAR_INTERVAL:
+            return
+        raw = make_image(f'聊天头像，圆形裁剪构图，角色居中，不包含文字。{prompt[:600]}', [])
+        if len(raw) > 6_000_000:
+            return
+        avatar = image_reference(raw)
+        with db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            last = conn.execute("SELECT value FROM state WHERE key='nono_avatar_changed'").fetchone()
+            if last and time.time() - int(last[0]) < AVATAR_INTERVAL:
+                return
+            conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar', ?)", (avatar,))
+            conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar_changed', ?)", (str(int(time.time())),))
+    except (requests.RequestException, RuntimeError, KeyError, ValueError, TypeError, IndexError):
+        app.logger.warning('诺诺头像生成未完成')
+
+
+def schedule_avatar_decision(history, name):
+    # 原子预留判断时段，避免并发聊天重复触发付费请求。
+    now = int(time.time())
+    with db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        rows = conn.execute("SELECT key,value FROM state WHERE key IN ('nono_avatar_changed','nono_avatar_next_check')").fetchall()
+        values = {row['key']: int(row['value']) for row in rows}
+        if now - values.get('nono_avatar_changed', 0) < AVATAR_INTERVAL or now < values.get('nono_avatar_next_check', 0):
+            return
+        conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar_next_check', ?)", (str(now + 3600),))
+    avatar_executor.submit(consider_avatar, history, name)
+
+
 @app.post('/memory-setting')
 @authenticated
 def memory_setting():
@@ -219,6 +332,7 @@ def chat():
             name = new_name
         except (requests.RequestException, RuntimeError, KeyError, ValueError):
             pass
+    schedule_avatar_decision([dict(r) for r in reversed(history[:10])] + [{'role': 'user', 'content': text}, {'role': 'assistant', 'content': reply}], name)
     return jsonify(reply=reply, name=name)
 
 

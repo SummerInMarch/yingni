@@ -1,5 +1,6 @@
 """在独立临时目录验证单用户、记忆清除和作品重生成。"""
 import os
+import base64
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,11 +19,33 @@ class AppTest(unittest.TestCase):
         response = client.post('/setup', json={'setup_token': 'test-setup-token', 'phone': '13800000000', 'password': 'testpassword', 'memory_enabled': True})
         self.assertEqual(response.status_code, 200)
         headers = {'Authorization': 'Bearer ' + response.json['token']}
+        self.assertEqual(client.get('/appearance').status_code, 401)
+        self.assertEqual(client.post('/appearance', headers=headers, json={'user_avatar': 'data:image/png;base64,bm90LWFuLWltYWdl'}).status_code, 400)
+        avatar = 'data:image/png;base64,' + base64.b64encode(b'\x89PNG\r\n\x1a\nexample').decode()
+        self.assertEqual(client.post('/appearance', headers=headers, json={'user_avatar': avatar}).status_code, 200)
+        self.assertEqual(client.get('/appearance', headers=headers).json['user_avatar'], avatar)
+        self.assertEqual(client.post('/appearance', headers=headers, json={'theme': 'blue', 'chat_background': avatar}).status_code, 200)
+        settings = client.get('/appearance', headers=headers).json
+        self.assertEqual((settings['theme'], settings['chat_background']), ('blue', avatar))
+        self.assertEqual(client.post('/appearance', headers=headers, json={'theme': 'invalid', 'user_avatar': ''}).status_code, 400)
+        self.assertEqual(client.get('/appearance', headers=headers).json['user_avatar'], avatar)
+        self.assertEqual(client.post('/appearance', headers=headers, json={'theme': 'custom', 'custom_color': '#1234ab'}).status_code, 200)
+        self.assertEqual(client.get('/appearance', headers=headers).json['custom_color'], '#1234ab')
+        self.assertEqual(client.post('/appearance', headers=headers, json={'custom_color': 'url(javascript:alert(1))'}).status_code, 400)
         self.assertEqual(client.post('/setup', json={'setup_token': 'test-setup-token', 'phone': '13800000000', 'password': 'testpassword'}).status_code, 409)
         self.assertEqual(client.post('/login', json={'phone': '13800000000', 'password': 'wrong'}).status_code, 401)
-        with patch.object(app, 'deepseek', side_effect=['诺诺回复', '{"memory":"喜欢素描","name":"诺诺"}']):
+        with patch.object(app, 'deepseek', side_effect=['诺诺回复', '{"memory":"喜欢素描","name":"诺诺"}']), patch.object(app, 'schedule_avatar_decision'):
             self.assertEqual(client.post('/chat', headers=headers, json={'message': '我喜欢素描'}).json['reply'], '诺诺回复')
         self.assertEqual(len(client.get('/messages', headers=headers).json['messages']), 2)
+        with patch.object(app.avatar_executor, 'submit') as submit:
+            app.schedule_avatar_decision([], '诺诺')
+            app.schedule_avatar_decision([], '诺诺')
+            self.assertEqual(submit.call_count, 1)
+        with patch.object(app, 'deepseek', return_value='{"change":true,"prompt":"卡通小猫"}'), patch.object(app, 'make_image', return_value=b'\x89PNG\r\n\x1a\nexample') as generate_avatar:
+            app.consider_avatar([], '诺诺')
+            app.consider_avatar([], '诺诺')
+            self.assertEqual(generate_avatar.call_count, 1)
+        self.assertTrue(client.get('/appearance', headers=headers).json['nono_avatar'])
         with patch.object(app, 'deepseek', return_value='{"scenes":["第一幕","第二幕"]}'), patch.object(app, 'make_image', return_value=b'fake image'):
             generated = client.post('/generate', headers=headers, json={'story': '测试故事', 'count': 2, 'refs': []})
             self.assertEqual(generated.status_code, 200)
