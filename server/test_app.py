@@ -31,7 +31,8 @@ def text_pdf():
 
 
 class AppTest(unittest.TestCase):
-    def test_user_journey(self):
+    @patch.object(app, 'queue_document_index')
+    def test_user_journey(self, queue_index):
         client = app.app.test_client()
         self.assertEqual(client.get('/works').status_code, 401)
         self.assertEqual(client.post('/setup', json={'setup_token': 'wrong'}).status_code, 403)
@@ -162,6 +163,43 @@ class AppTest(unittest.TestCase):
         self.assertEqual(len(client.get('/works', headers=headers).json['works']), 1)
         self.assertEqual(client.post('/logout', headers=headers).status_code, 200)
         self.assertEqual(client.get('/works', headers=headers).status_code, 401)
+
+
+class DocumentUploadTest(unittest.TestCase):
+    def test_long_upload_index_retry_and_delete(self):
+        from pathlib import Path
+        with tempfile.TemporaryDirectory(prefix='yingni-index-test-') as directory:
+            root = Path(directory)
+            (root / 'files').mkdir()
+            with patch.object(app, 'ROOT', root):
+                app.init_db()
+                with app.db() as conn:
+                    conn.execute("INSERT INTO account VALUES ('user', 'password', 0)")
+                headers = {'Authorization': 'Bearer ' + app.token()}
+                index = app.DocumentIndex(app.db, lambda texts, query: [[1.0, 0.0] for _ in texts], lambda text: text[:30],
+                                          lambda conn, file_id: bool(conn.execute('SELECT 1 FROM attachments WHERE id=?', (file_id,)).fetchone()))
+                def run_now(function, *args):
+                    function(*args)
+                with patch.object(app, 'get_document_index', return_value=index), patch.object(app.index_executor, 'submit', side_effect=run_now):
+                    client = app.app.test_client()
+                    raw = ('用于测试长文件内容。' * 7000).encode()
+                    result = client.post('/files', headers=headers, data={'file': (io.BytesIO(raw), 'large.txt')}, content_type='multipart/form-data')
+                    self.assertEqual(result.status_code, 200)
+                    file_id = result.json['file']['id']
+                    self.assertEqual(result.json['file']['read_error'], '')
+                    self.assertEqual(client.get('/files/' + file_id + '/index', headers=headers).json['status'], 'ready')
+                    with app.db() as conn:
+                        self.assertGreater(conn.execute('SELECT COUNT(*) FROM document_index WHERE file_id=?', (file_id,)).fetchone()[0], 1)
+                    with patch.object(app, 'get_document_index', side_effect=RuntimeError('test failure')):
+                        failed = client.post('/files', headers=headers, data={'file': (io.BytesIO(b'retry text'), 'retry.txt')}, content_type='multipart/form-data')
+                    retry_id = failed.json['file']['id']
+                    self.assertEqual(client.get('/files/' + retry_id + '/index', headers=headers).json['status'], 'failed')
+                    self.assertEqual(client.post('/files/' + retry_id + '/index', headers=headers).json['status'], 'ready')
+                    self.assertEqual(client.delete('/files/' + retry_id, headers=headers).status_code, 200)
+                    self.assertEqual(client.delete('/files/' + file_id, headers=headers).status_code, 200)
+                    with app.db() as conn:
+                        self.assertEqual(conn.execute('SELECT COUNT(*) FROM document_index WHERE file_id=?', (file_id,)).fetchone()[0], 0)
+
 
 
 if __name__ == '__main__':

@@ -5,10 +5,11 @@ import threading
 
 
 class DocumentIndex:
-    def __init__(self, connection_factory, embed, summarize):
+    def __init__(self, connection_factory, embed, summarize, is_live=None):
         self.connection_factory = connection_factory
         self.embed = embed
         self.summarize = summarize
+        self.is_live = is_live
 
     @staticmethod
     def initialize(conn):
@@ -33,8 +34,11 @@ class DocumentIndex:
                 for i, (chunk, summary, vector) in enumerate(zip(chunks, summaries, vectors))]
         with self.connection_factory() as conn:
             self.initialize(conn)
+            if self.is_live and not self.is_live(conn, file_id):
+                return False
             conn.execute('DELETE FROM document_index WHERE file_id=?', (file_id,))
             conn.executemany('INSERT INTO document_index VALUES (?,?,?,?,?)', rows)
+        return True
 
     def search(self, file_ids, question, limit=5):
         if not file_ids or not question.strip():
