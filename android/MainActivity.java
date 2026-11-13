@@ -24,7 +24,7 @@ public class MainActivity extends Activity {
     private static final String SETUP_TOKEN = "__SETUP_TOKEN__";
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
-    private String pendingPicture;
+    private String pendingPath;
     private String pendingToken;
 
     @Override public void onCreate(Bundle state) {
@@ -65,11 +65,11 @@ public class MainActivity extends Activity {
             fileCallback = null;
         }
         if (requestCode == 42) {
-            String picture = pendingPicture, token = pendingToken;
-            pendingPicture = null; pendingToken = null;
-            if (resultCode == RESULT_OK && data != null && data.getData() != null && picture != null && token != null) {
+            String path = pendingPath, token = pendingToken;
+            pendingPath = null; pendingToken = null;
+            if (resultCode == RESULT_OK && data != null && data.getData() != null && path != null && token != null) {
                 Uri destination = data.getData();
-                new Thread(() -> savePicture(destination, picture, token)).start();
+                new Thread(() -> saveFile(destination, path, token)).start();
             }
         }
     }
@@ -77,23 +77,33 @@ public class MainActivity extends Activity {
     private class NativeBridge {
         @JavascriptInterface public void savePicture(String picture, String token, String mime) {
             if (picture == null || token == null || !picture.matches("[a-f0-9]{32}") || !token.matches("[A-Za-z0-9_-]{30,100}") || !("image/jpeg".equals(mime) || "image/png".equals(mime))) return;
+            chooseDestination("picture/" + picture, token, mime, "yingni-" + picture.substring(0, 8) + ("image/jpeg".equals(mime) ? ".jpg" : ".png"));
+        }
+
+        @JavascriptInterface public void saveDocument(String id, String token, String name, String mime) {
+            if (id == null || token == null || name == null || mime == null || !id.matches("[a-f0-9]{32}") || !token.matches("[A-Za-z0-9_-]{30,100}") || name.length() > 160 || !mime.matches("text/plain|application/pdf|application/vnd\\.openxmlformats-officedocument\\.wordprocessingml\\.document")) return;
+            String safeName = name.replaceAll("[/\\\\\\p{Cntrl}]", "_");
+            chooseDestination("files/" + id, token, mime, safeName);
+        }
+
+        private void chooseDestination(String path, String token, String mime, String name) {
             runOnUiThread(() -> {
-                pendingPicture = picture; pendingToken = token;
+                pendingPath = path; pendingToken = token;
                 Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
                 intent.addCategory(Intent.CATEGORY_OPENABLE);
                 intent.setType(mime);
-                intent.putExtra(Intent.EXTRA_TITLE, "yingni-" + picture.substring(0, 8) + ("image/jpeg".equals(mime) ? ".jpg" : ".png"));
+                intent.putExtra(Intent.EXTRA_TITLE, name);
                 try { startActivityForResult(intent, 42); }
-                catch (Exception e) { pendingPicture = null; pendingToken = null; Toast.makeText(MainActivity.this, "无法打开保存位置", Toast.LENGTH_SHORT).show(); }
+                catch (Exception e) { pendingPath = null; pendingToken = null; Toast.makeText(MainActivity.this, "无法打开保存位置", Toast.LENGTH_SHORT).show(); }
             });
         }
     }
 
-    private void savePicture(Uri destination, String picture, String token) {
+    private void saveFile(Uri destination, String path, String token) {
         HttpURLConnection connection = null;
         boolean success = false;
         try {
-            connection = (HttpURLConnection) new URL(HOME + "picture/" + picture).openConnection();
+            connection = (HttpURLConnection) new URL(HOME + path).openConnection();
             connection.setRequestProperty("Authorization", "Bearer " + token);
             connection.setConnectTimeout(15000); connection.setReadTimeout(60000);
             if (connection.getResponseCode() != 200) throw new java.io.IOException("download failed");
@@ -109,7 +119,7 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) { }
         finally { if (connection != null) connection.disconnect(); }
         final boolean saved = success;
-        runOnUiThread(() -> Toast.makeText(this, saved ? "图片已保存" : "图片保存失败，请重试", Toast.LENGTH_SHORT).show());
+        runOnUiThread(() -> Toast.makeText(this, saved ? "已保存" : "保存失败，请重试", Toast.LENGTH_SHORT).show());
     }
 
     @Override public void onBackPressed() {
