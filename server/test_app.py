@@ -57,10 +57,10 @@ class AppTest(unittest.TestCase):
             self.assertEqual(client.post('/chat', headers=headers, json={'message': '我喜欢素描'}).json['reply'], '诺诺回复')
         self.assertEqual(len(client.get('/messages', headers=headers).json['messages']), 2)
         self.assertEqual(client.get('/files').status_code, 401)
-        uploaded = client.post('/files', headers=headers, data={'file': (io.BytesIO('这是测试文件'.encode()), '../notes.txt')}, content_type='multipart/form-data')
+        uploaded = client.post('/files', headers=headers, data={'file': (io.BytesIO('这是测试文件'.encode()), '../%E6%B5%8B%E8%AF%95.txt')}, content_type='multipart/form-data')
         self.assertEqual(uploaded.status_code, 200)
         note = uploaded.json['file']
-        self.assertEqual(note['name'], 'notes.txt')
+        self.assertEqual(note['name'], '测试.txt')
         self.assertEqual(client.get('/files/' + note['id']).status_code, 401)
         downloaded = client.get('/files/' + note['id'], headers=headers)
         self.assertEqual(downloaded.data, '这是测试文件'.encode()); downloaded.close()
@@ -86,12 +86,15 @@ class AppTest(unittest.TestCase):
             self.assertIn('这是测试文件', captured[-1][-2]['content'])
         history = client.get('/messages', headers=headers).json['messages']
         self.assertEqual(len(history[-4]['attachments']), 3)
+        with patch.object(app, 'deepseek', side_effect=fake_chat), patch.object(app, 'schedule_avatar_decision'):
+            self.assertEqual(client.post('/chat', headers=headers, json={'message': '', 'attachments': [note['id']]}).status_code, 200)
+        self.assertEqual(client.get('/messages', headers=headers).json['messages'][-2]['content'], '')
         self.assertEqual(len(client.get('/files', headers=headers).json['files']), 4)
         with patch.object(app.avatar_executor, 'submit') as submit:
             app.schedule_avatar_decision([], '诺诺')
             app.schedule_avatar_decision([], '诺诺')
             self.assertEqual(submit.call_count, 1)
-        with patch.object(app, 'deepseek', return_value='{"change":true,"prompt":"卡通小猫"}'), patch.object(app, 'make_image', return_value=b'\x89PNG\r\n\x1a\nexample') as generate_avatar:
+        with patch.object(app, 'deepseek', return_value='{"change":false,"prompt":"卡通小猫"}'), patch.object(app, 'make_image', return_value=b'\x89PNG\r\n\x1a\nexample') as generate_avatar:
             app.consider_avatar([], '诺诺')
             app.consider_avatar([], '诺诺')
             self.assertEqual(generate_avatar.call_count, 1)

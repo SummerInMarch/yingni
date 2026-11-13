@@ -51,6 +51,29 @@ $('#auth-form').addEventListener('submit', async event => {
   } catch(e) { toast(e.message || '网络连接失败'); } finally { busy(); }
 });
 document.querySelectorAll('[data-go]').forEach(x => x.addEventListener('click', () => screen(x.dataset.go)));
+// 使用 DOM 节点渲染常见格式，避免把聊天内容当作 HTML 执行。
+function renderChatText(container, content) {
+  const lines = content.split('\n');
+  lines.forEach((line, index) => {
+    if (index) container.append(document.createElement('br'));
+    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) { container.append(document.createElement('hr')); return; }
+    const heading = line.match(/^#{1,6}\s+(.+)$/);
+    const target = heading ? document.createElement('strong') : container;
+    const text = heading ? heading[1] : line;
+    const pattern = /\*\*(.+?)\*\*|__(.+?)__/g;
+    let last = 0, match;
+    while ((match = pattern.exec(text))) {
+      target.append(document.createTextNode(text.slice(last, match.index)));
+      const strong = document.createElement('strong'); strong.textContent = match[1] || match[2]; target.append(strong);
+      last = pattern.lastIndex;
+    }
+    target.append(document.createTextNode(text.slice(last)));
+    if (heading) container.append(target);
+  });
+}
+function displayFileName(name) {
+  try { return /%[c-f][0-9a-f]%[89ab][0-9a-f]/i.test(name) ? decodeURIComponent(name) : name; } catch { return name; }
+}
 function addMessage(role, content, attachments = []) {
   const row = document.createElement('div'); row.className = 'message-row' + (role === 'user' ? ' mine' : '');
   const avatar = document.createElement('span'); avatar.className = 'avatar ' + (role === 'user' ? 'avatar-user' : 'avatar-nono');
@@ -59,10 +82,10 @@ function addMessage(role, content, attachments = []) {
   else avatar.textContent = role === 'user' ? '我' : '◡';
   if (role !== 'user') row.append(avatar);
   const bubble = document.createElement('div'); bubble.className = 'bubble';
-  const message = document.createElement('span'); message.textContent = content; bubble.append(message);
+  const message = document.createElement('span'); if (role === 'assistant') renderChatText(message, content); else message.textContent = content; bubble.append(message);
   attachments.forEach(file => {
     const item = document.createElement('button'); item.type = 'button'; item.className = 'message-file';
-    item.textContent = `📎 ${file.name}${file.read_error ? '（暂不能阅读）' : ''}`;
+    item.textContent = `📎 ${displayFileName(file.name)}${file.read_error ? '（暂不能阅读）' : ''}`;
     item.onclick = () => downloadDocument(file); bubble.append(item);
   });
   row.append(bubble); $('#messages').append(row);
@@ -76,7 +99,7 @@ async function loadMessages() {
 }
 $('#chat-form').addEventListener('submit', async event => {
   event.preventDefault(); const input = $('#chat-input'), text = input.value.trim(); if (!text && !selectedFiles.length) return;
-  const attachments = [...selectedFiles], message = text || '请阅读上传的文件，并概括主要内容。';
+  const attachments = [...selectedFiles], message = text;
   input.value = ''; addMessage('user', message, attachments); $('#send').disabled = true; window.scrollTo(0, document.body.scrollHeight);
   try { const result = await api('chat', 'POST', {message, attachments: attachments.map(f => f.id)}); selectedFiles = []; renderSelectedFiles(); $('.chat-heading strong').textContent = result.name; addMessage('assistant', result.reply); window.scrollTo(0, document.body.scrollHeight); }
   catch(e) { toast(e.message || '发送失败'); input.value = text; await loadMessages(); } finally { $('#send').disabled = false; }
@@ -85,7 +108,7 @@ $('#chat-form').addEventListener('submit', async event => {
 // 文件会先保存到账号中，发送时再关联到聊天消息。
 const attachmentButton = document.createElement('button'); attachmentButton.type = 'button'; attachmentButton.className = 'attachment-button'; attachmentButton.textContent = '＋'; attachmentButton.setAttribute('aria-label', '上传文件');
 const fileInput = document.createElement('input'); fileInput.type = 'file'; fileInput.accept = '.txt,.docx,.pdf,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document'; fileInput.multiple = true; fileInput.hidden = true;
-$('#chat-form').prepend(attachmentButton); $('.chat-composer').append(fileInput);
+$('#chat-form').insertBefore(attachmentButton, $('#send')); $('.chat-composer').append(fileInput);
 const fileQueue = document.createElement('div'); fileQueue.className = 'file-queue'; fileQueue.hidden = true;
 $('.chat-composer').insertBefore(fileQueue, $('#chat-form'));
 attachmentButton.onclick = () => fileInput.click();
@@ -93,7 +116,7 @@ function renderSelectedFiles() {
   fileQueue.replaceChildren(); fileQueue.hidden = selectedFiles.length === 0;
   selectedFiles.forEach(file => {
     const chip = document.createElement('button'); chip.type = 'button'; chip.className = 'file-chip';
-    chip.textContent = `${file.read_error ? '⚠ ' : '📎 '}${file.name} ×`;
+    chip.textContent = `${file.read_error ? '⚠ ' : '📎 '}${displayFileName(file.name)} ×`;
     chip.onclick = () => { selectedFiles = selectedFiles.filter(x => x.id !== file.id); renderSelectedFiles(); };
     fileQueue.append(chip);
   });
@@ -129,16 +152,16 @@ async function loadFiles() {
   const list = $('#files-list'); list.replaceChildren();
   try {
     const result = await api('files');
-    if (!result.files.length) { const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = '还没有上传文件。在聊天框左侧点击加号即可添加。'; list.append(empty); }
+    if (!result.files.length) { const empty = document.createElement('p'); empty.className = 'muted'; empty.textContent = '还没有上传文件。在聊天框右侧点击加号即可添加。'; list.append(empty); }
     result.files.forEach(file => {
       const card = document.createElement('div'); card.className = 'file-card';
-      const title = document.createElement('strong'); title.textContent = file.name; card.append(title);
+      const title = document.createElement('strong'); title.textContent = displayFileName(file.name); card.append(title);
       const detail = document.createElement('p'); detail.textContent = file.read_error || `${Math.max(1, Math.ceil(file.size / 1024))} KB · 可供诺诺阅读`; card.append(detail);
       const actions = document.createElement('div'); actions.className = 'file-actions';
       const use = document.createElement('button'); use.textContent = '添加到聊天'; use.onclick = () => { selectFile(file); screen('chat'); };
       const save = document.createElement('button'); save.textContent = '保存到手机'; save.onclick = () => downloadDocument(file);
       const remove = document.createElement('button'); remove.textContent = '删除'; remove.onclick = async () => {
-        if (!confirm(`确定删除“${file.name}”？聊天中已有的文字回复不会删除。`)) return;
+        if (!confirm(`确定删除“${displayFileName(file.name)}”？聊天中已有的文字回复不会删除。`)) return;
         try { await api(`files/${file.id}`, 'DELETE'); selectedFiles = selectedFiles.filter(x => x.id !== file.id); renderSelectedFiles(); await loadFiles(); toast('文件已删除'); }
         catch(e) { toast(e.message || '文件删除失败'); }
       };
@@ -151,12 +174,12 @@ async function downloadDocument(file) {
   const mime = {txt:'text/plain', pdf:'application/pdf', docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}[extension];
   if (!mime) return toast('不支持此文件类型');
   if (window.Yingni) {
-    if (typeof window.Yingni.saveDocument === 'function') return window.Yingni.saveDocument(file.id, access, file.name, mime);
+    if (typeof window.Yingni.saveDocument === 'function') return window.Yingni.saveDocument(file.id, access, displayFileName(file.name), mime);
     return toast('请安装最新版映你后保存文件');
   }
   try {
     const response = await fetch(`files/${file.id}`, {headers: {Authorization: `Bearer ${access}`}}); if (!response.ok) throw new Error('文件下载失败');
-    const url = URL.createObjectURL(await response.blob()), link = document.createElement('a'); link.href = url; link.download = file.name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const url = URL.createObjectURL(await response.blob()), link = document.createElement('a'); link.href = url; link.download = displayFileName(file.name); link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch(e) { toast(e.message || '文件下载失败'); }
 }
 // 参考图也可直接作为风格来源。
@@ -205,6 +228,20 @@ function applyAppearance(settings) {
   document.querySelectorAll('.avatar-nono, .mini-face').forEach(x => setAvatar(x, nonoAvatar, '◡'));
   themeControl.lastChild.textContent = themes.find(t => t.id === currentTheme)?.name || '自定义';
 }
+// 本地缩放头像，避免原图大小影响上传和后续加载。
+async function prepareAvatar(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const image = new Image();
+    await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; image.src = url; });
+    const scale = Math.min(1, 1024 / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale)); canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext('2d'); context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } finally { URL.revokeObjectURL(url); }
+}
 // 头像通过账号保存，重新登录后仍可使用。
 const avatarControl = document.createElement('button');
 avatarControl.type = 'button'; avatarControl.textContent = '☻　设置我的头像';
@@ -214,8 +251,8 @@ $('.profile-list').prepend(avatarControl); $('.profile-body').append(avatarInput
 avatarControl.onclick = () => avatarInput.click();
 avatarInput.onchange = async () => {
   const file = avatarInput.files[0]; if (!file) return;
-  if (file.size > 2_000_000 || !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { toast('请选择不超过 2 MB 的 JPG、PNG 或 WebP 图片'); avatarInput.value = ''; return; }
-  try { const result = await api('appearance', 'POST', {user_avatar: await readFile(file)}); applyAppearance(result); toast('头像已保存'); }
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { toast('请选择 JPG、PNG 或 WebP 图片'); avatarInput.value = ''; return; }
+  try { const result = await api('appearance', 'POST', {user_avatar: await prepareAvatar(file)}); applyAppearance(result); toast('头像已保存'); }
   catch (e) { toast(e.message || '头像保存失败'); } finally { avatarInput.value = ''; }
 };
 const nonoInfo = document.createElement('div'); nonoInfo.className = 'appearance-note'; nonoInfo.textContent = '✳ 诺诺会自己决定头像，最多每 7 天更换一次';

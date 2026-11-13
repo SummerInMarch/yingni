@@ -14,6 +14,7 @@ from functools import wraps
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import unquote
 
 import requests
 from docx import Document
@@ -259,7 +260,13 @@ def files():
         upload = request.files.get('file')
         if not upload or not upload.filename:
             return jsonify(error='请选择文件'), 400
-        name = upload.filename.replace('\\', '/').rsplit('/', 1)[-1].strip()
+        name = upload.filename
+        if re.search(r'%[c-f][0-9a-f]%[89ab][0-9a-f]', name, re.I):
+            try:
+                name = unquote(name, errors='strict')
+            except UnicodeDecodeError:
+                pass
+        name = name.replace('\\', '/').rsplit('/', 1)[-1].strip()
         if not name or len(name) > 160 or any(ord(c) < 32 for c in name):
             return jsonify(error='文件名不正确或过长'), 400
         kind = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
@@ -369,15 +376,19 @@ def avatar_version():
 def consider_avatar(history, name):
     """诺诺在对话后自行判断；生成失败不覆盖现有头像。"""
     try:
+        with db() as conn:
+            has_avatar = bool(conn.execute("SELECT value FROM state WHERE key='nono_avatar' AND value != ''").fetchone())
+        instruction = ('你还没有头像，请自己决定并描述一个你喜欢的头像。' if not has_avatar else
+                       '依据最近交流，只有你确实想换头像时才决定更换，不要为了完成任务勉强更换。')
         answer = deepseek([
-            {'role': 'system', 'content': '你正在决定自己的聊天头像。依据最近交流，只有你确实想换头像时才决定更换，不要为了完成任务勉强更换。输出JSON：change为布尔值，prompt为你想要的头像描述字符串（无需引用用户照片）。头像须为适合圆形裁剪的单人或角色近景，不包含文字。'},
+            {'role': 'system', 'content': '你正在决定自己的聊天头像。' + instruction + '输出JSON：change为布尔值，prompt为你想要的头像描述字符串（无需引用用户照片）。头像须为适合圆形裁剪的单人或角色近景，不包含文字。'},
             {'role': 'user', 'content': f'你的名字：{name}。最近的聊天：{json.dumps(history, ensure_ascii=False)}'}
         ], True)
         choice = json.loads(answer)
         if not isinstance(choice, dict):
             return
         prompt = choice.get('prompt')
-        if choice.get('change') is not True or not isinstance(prompt, str) or not prompt.strip():
+        if (has_avatar and choice.get('change') is not True) or not isinstance(prompt, str) or not prompt.strip():
             return
         with db() as conn:
             last = conn.execute("SELECT value FROM state WHERE key='nono_avatar_changed'").fetchone()
@@ -440,8 +451,6 @@ def chat():
         return jsonify(error='每条消息最多选择 3 个不同文件'), 400
     if (not text and not attachment_ids) or len(text) > 4000:
         return jsonify(error='请输入不超过 4000 字的消息'), 400
-    if not text:
-        text = '请阅读上传的文件，并概括主要内容。'
     with db() as conn:
         history_rows = conn.execute('SELECT id,role,content FROM messages ORDER BY id DESC LIMIT 30').fetchall()
         row = conn.execute("SELECT value FROM state WHERE key='memory'").fetchone()
@@ -475,7 +484,7 @@ def chat():
             document_context += '\n\n文件：' + item['name'] + '\n' + (item['text'] or ('无法读取：' + item['read_error']))
     try:
         file_messages = [{'role': 'user', 'content': document_context}] if files else []
-        reply = deepseek([{'role': 'system', 'content': system}] + list(reversed(history)) + file_messages + [{'role': 'user', 'content': text}])
+        reply = deepseek([{'role': 'system', 'content': system}] + list(reversed(history)) + file_messages + [{'role': 'user', 'content': text or '用户发送了文件。'}])
     except (requests.RequestException, RuntimeError, KeyError, ValueError):
         return jsonify(error='诺诺暂时没有连上，请稍后重试'), 502
     with db() as conn:
