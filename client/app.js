@@ -74,7 +74,12 @@ function renderChatText(container, content) {
 function displayFileName(name) {
   try { return /%[c-f][0-9a-f]%[89ab][0-9a-f]/i.test(name) ? decodeURIComponent(name) : name; } catch { return name; }
 }
-function addMessage(role, content, attachments = []) {
+function formatChatTime(timestamp) {
+  const parts = new Intl.DateTimeFormat('zh-CN', {timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'}).formatToParts(new Date(timestamp * 1000));
+  const value = type => parts.find(part => part.type === type).value;
+  return `${value('year')}-${value('month')}-${value('day')} ${value('hour')}:${value('minute')}`;
+}
+function addMessage(role, content, attachments = [], created = null) {
   const row = document.createElement('div'); row.className = 'message-row' + (role === 'user' ? ' mine' : '');
   const avatar = document.createElement('span'); avatar.className = 'avatar ' + (role === 'user' ? 'avatar-user' : 'avatar-nono');
   const source = role === 'user' ? userAvatar : nonoAvatar;
@@ -88,20 +93,22 @@ function addMessage(role, content, attachments = []) {
     item.textContent = `📎 ${displayFileName(file.name)}${file.read_error ? '（暂不能阅读）' : ''}`;
     item.onclick = () => downloadDocument(file); bubble.append(item);
   });
+  if (created) { const time = document.createElement('time'); time.className = 'message-time'; time.dateTime = new Date(created * 1000).toISOString(); time.textContent = formatChatTime(created); bubble.append(time); }
   row.append(bubble); $('#messages').append(row);
   if (role === 'user') row.append(avatar);
 }
 async function loadMessages() {
   try { const [data, appearance] = await Promise.all([api('messages'), api('appearance')]); applyAppearance(appearance); memoryEnabled = data.memory_enabled; $('.chat-heading strong').textContent = data.name; $('#messages').replaceChildren();
     if (!data.messages.length) addMessage('assistant', '嗨，我是诺诺。今天的你，过得怎么样？');
-    data.messages.forEach(m => addMessage(m.role, m.content, m.attachments || [])); window.scrollTo(0, document.body.scrollHeight);
+    data.messages.forEach(m => addMessage(m.role, m.content, m.attachments || [], m.created)); window.scrollTo(0, document.body.scrollHeight);
+    if (!nonoAvatar) api('avatar-initialize', 'POST').catch(() => {});
   } catch(e) { toast(e.message); }
 }
 $('#chat-form').addEventListener('submit', async event => {
   event.preventDefault(); const input = $('#chat-input'), text = input.value.trim(); if (!text && !selectedFiles.length) return;
   const attachments = [...selectedFiles], message = text;
-  input.value = ''; addMessage('user', message, attachments); $('#send').disabled = true; window.scrollTo(0, document.body.scrollHeight);
-  try { const result = await api('chat', 'POST', {message, attachments: attachments.map(f => f.id)}); selectedFiles = []; renderSelectedFiles(); $('.chat-heading strong').textContent = result.name; addMessage('assistant', result.reply); window.scrollTo(0, document.body.scrollHeight); }
+  input.value = ''; addMessage('user', message, attachments, Math.floor(Date.now() / 1000)); $('#send').disabled = true; window.scrollTo(0, document.body.scrollHeight);
+  try { const result = await api('chat', 'POST', {message, attachments: attachments.map(f => f.id)}); selectedFiles = []; renderSelectedFiles(); $('.chat-heading strong').textContent = result.name; const sentTime = $('#messages .mine:last-of-type .message-time'); if (sentTime && result.user_created) { sentTime.dateTime = new Date(result.user_created * 1000).toISOString(); sentTime.textContent = formatChatTime(result.user_created); } addMessage('assistant', result.reply, [], result.reply_created); window.scrollTo(0, document.body.scrollHeight); }
   catch(e) { toast(e.message || '发送失败'); input.value = text; await loadMessages(); } finally { $('#send').disabled = false; }
 });
 
@@ -225,6 +232,7 @@ function applyAppearance(settings) {
   const chat = $('#chat');
   chat.style.backgroundImage = settings.chat_background ? `linear-gradient(#ffffff88,#ffffff88),url("${settings.chat_background}")` : '';
   document.querySelectorAll('.avatar-user').forEach(x => setAvatar(x, userAvatar, '我'));
+  setAvatar($('.profile-avatar'), userAvatar, '映');
   document.querySelectorAll('.avatar-nono, .mini-face').forEach(x => setAvatar(x, nonoAvatar, '◡'));
   themeControl.lastChild.textContent = themes.find(t => t.id === currentTheme)?.name || '自定义';
 }

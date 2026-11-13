@@ -55,7 +55,13 @@ class AppTest(unittest.TestCase):
         self.assertEqual(client.post('/login', json={'phone': '13800000000', 'password': 'wrong'}).status_code, 401)
         with patch.object(app, 'deepseek', side_effect=['诺诺回复', '{"memory":"喜欢素描","name":"诺诺"}']), patch.object(app, 'schedule_avatar_decision'):
             self.assertEqual(client.post('/chat', headers=headers, json={'message': '我喜欢素描'}).json['reply'], '诺诺回复')
-        self.assertEqual(len(client.get('/messages', headers=headers).json['messages']), 2)
+        initial_messages = client.get('/messages', headers=headers).json['messages']
+        self.assertEqual(len(initial_messages), 2)
+        self.assertTrue(all(isinstance(m['created'], int) for m in initial_messages))
+        self.assertEqual(app.beijing_time(0), '1970-01-01 08:00:00')
+        with patch.object(app, 'schedule_avatar_decision') as initialize:
+            self.assertEqual(client.post('/avatar-initialize', headers=headers).status_code, 200)
+            self.assertTrue(initialize.call_args.kwargs['initial_only'])
         self.assertEqual(client.get('/files').status_code, 401)
         uploaded = client.post('/files', headers=headers, data={'file': (io.BytesIO('这是测试文件'.encode()), '../%E6%B5%8B%E8%AF%95.txt')}, content_type='multipart/form-data')
         self.assertEqual(uploaded.status_code, 200)
@@ -81,6 +87,10 @@ class AppTest(unittest.TestCase):
         with patch.object(app, 'deepseek', side_effect=fake_chat), patch.object(app, 'schedule_avatar_decision'):
             reply = client.post('/chat', headers=headers, json={'message': '总结文件', 'attachments': [note['id'], word['id'], pdf['id']]})
             self.assertEqual(reply.status_code, 200)
+            self.assertIsInstance(reply.json['user_created'], int)
+            self.assertIsInstance(reply.json['reply_created'], int)
+            self.assertTrue(all('北京时间' in m['content'] for m in captured[-1][1:-2]))
+            self.assertIn('北京时间', captured[-1][-1]['content'])
             self.assertTrue(all(word in captured[-1][-2]['content'] for word in ('这是测试文件', '正文内容', '表格内容', 'Hello PDF')))
             self.assertEqual(client.post('/chat', headers=headers, json={'message': '继续说'}).status_code, 200)
             self.assertIn('这是测试文件', captured[-1][-2]['content'])
@@ -99,6 +109,9 @@ class AppTest(unittest.TestCase):
             app.consider_avatar([], '诺诺')
             self.assertEqual(generate_avatar.call_count, 1)
         self.assertTrue(client.get('/appearance', headers=headers).json['nono_avatar'])
+        with patch.object(app.avatar_executor, 'submit') as submit:
+            app.schedule_avatar_decision([], '诺诺', initial_only=True)
+            submit.assert_not_called()
         with patch.object(app, 'deepseek', return_value='{"scenes":["第一幕","第二幕"]}'), patch.object(app, 'make_image', return_value=b'fake image'):
             generated = client.post('/generate', headers=headers, json={'story': '测试故事', 'count': 2, 'refs': []})
             self.assertEqual(generated.status_code, 200)

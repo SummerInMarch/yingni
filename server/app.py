@@ -14,6 +14,7 @@ from functools import wraps
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote
 
 import requests
@@ -176,13 +177,13 @@ def deepseek(messages, json_mode=False):
 @authenticated
 def messages():
     with db() as conn:
-        rows = conn.execute('SELECT id,role,content FROM messages ORDER BY id DESC LIMIT 200').fetchall()
+        rows = conn.execute('SELECT id,role,content,created FROM messages ORDER BY id DESC LIMIT 200').fetchall()
         enabled = conn.execute('SELECT memory_enabled FROM account').fetchone()[0]
         name = conn.execute("SELECT value FROM state WHERE key='nono_name'").fetchone()
         result = []
         for row in reversed(rows):
             attached = conn.execute('SELECT a.id,a.name,a.size,a.read_error FROM attachments a JOIN message_files m ON m.attachment_id=a.id WHERE m.message_id=? ORDER BY a.created', (row['id'],)).fetchall()
-            result.append({'role': row['role'], 'content': row['content'], 'attachments': [dict(x) for x in attached]})
+            result.append({'role': row['role'], 'content': row['content'], 'created': row['created'], 'attachments': [dict(x) for x in attached]})
     return jsonify(messages=result, memory_enabled=bool(enabled), name=name[0] if name else '诺诺')
 
 
@@ -386,16 +387,21 @@ def consider_avatar(history, name):
         ], True)
         choice = json.loads(answer)
         if not isinstance(choice, dict):
+            app.logger.warning('诺诺头像生成：模型返回格式不正确')
             return
         prompt = choice.get('prompt')
-        if (has_avatar and choice.get('change') is not True) or not isinstance(prompt, str) or not prompt.strip():
+        if (has_avatar and choice.get('change') is not True):
+            return
+        if not isinstance(prompt, str) or not prompt.strip():
+            app.logger.warning('诺诺头像生成：模型未提供头像描述')
             return
         with db() as conn:
             last = conn.execute("SELECT value FROM state WHERE key='nono_avatar_changed'").fetchone()
         if last and time.time() - int(last[0]) < AVATAR_INTERVAL:
             return
         raw = make_image(f'聊天头像，圆形裁剪构图，角色居中，不包含文字。{prompt[:600]}', [])
-        if len(raw) > 6_000_000:
+        if not raw or len(raw) > 12_000_000:
+            app.logger.warning('诺诺头像生成：图片为空或超过保存限制')
             return
         avatar = image_reference(raw)
         with db() as conn:
@@ -405,21 +411,38 @@ def consider_avatar(history, name):
                 return
             conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar', ?)", (avatar,))
             conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar_changed', ?)", (str(int(time.time())),))
-    except (requests.RequestException, RuntimeError, KeyError, ValueError, TypeError, IndexError):
-        app.logger.warning('诺诺头像生成未完成')
+    except (requests.RequestException, RuntimeError, KeyError, ValueError, TypeError, IndexError) as exc:
+        app.logger.warning('诺诺头像生成未完成，错误类型：%s', type(exc).__name__)
 
 
-def schedule_avatar_decision(history, name):
+def schedule_avatar_decision(history, name, initial_only=False):
     # 原子预留判断时段，避免并发聊天重复触发付费请求。
     now = int(time.time())
     with db() as conn:
         conn.execute('BEGIN IMMEDIATE')
+        if initial_only and conn.execute("SELECT 1 FROM state WHERE key='nono_avatar' AND value != ''").fetchone():
+            return
         rows = conn.execute("SELECT key,value FROM state WHERE key IN ('nono_avatar_changed','nono_avatar_next_check')").fetchall()
         values = {row['key']: int(row['value']) for row in rows}
         if now - values.get('nono_avatar_changed', 0) < AVATAR_INTERVAL or now < values.get('nono_avatar_next_check', 0):
             return
         conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar_next_check', ?)", (str(now + 3600),))
     avatar_executor.submit(consider_avatar, history, name)
+
+
+@app.post('/avatar-initialize')
+@authenticated
+def avatar_initialize():
+    with db() as conn:
+        rows = conn.execute('SELECT role,content FROM messages ORDER BY id DESC LIMIT 10').fetchall()
+        name = conn.execute("SELECT value FROM state WHERE key='nono_name'").fetchone()
+    history = [dict(row) for row in reversed(rows)]
+    schedule_avatar_decision(history, name[0] if name else '诺诺', initial_only=True)
+    return jsonify(ok=True)
+
+
+def beijing_time(timestamp):
+    return datetime.fromtimestamp(timestamp, timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
 
 
 @app.post('/memory-setting')
@@ -444,6 +467,7 @@ def forget_all():
 @app.post('/chat')
 @authenticated
 def chat():
+    received_at = int(time.time())
     body = data()
     text = str(body.get('message', '')).strip()
     attachment_ids = body.get('attachments', [])
@@ -452,7 +476,7 @@ def chat():
     if (not text and not attachment_ids) or len(text) > 4000:
         return jsonify(error='请输入不超过 4000 字的消息'), 400
     with db() as conn:
-        history_rows = conn.execute('SELECT id,role,content FROM messages ORDER BY id DESC LIMIT 30').fetchall()
+        history_rows = conn.execute('SELECT id,role,content,created FROM messages ORDER BY id DESC LIMIT 30').fetchall()
         row = conn.execute("SELECT value FROM state WHERE key='memory'").fetchone()
         name_row = conn.execute("SELECT value FROM state WHERE key='nono_name'").fetchone()
         enabled = bool(conn.execute('SELECT memory_enabled FROM account').fetchone()[0])
@@ -467,13 +491,14 @@ def chat():
             if not item:
                 return jsonify(error='选择的文件不存在，请重新选择'), 400
             files.append(dict(item))
-    history = [{'role': r['role'], 'content': r['content']} for r in history_rows]
+    history = [{'role': r['role'], 'content': f"[北京时间 {beijing_time(r['created'])}] {r['content']}"} for r in history_rows]
     if sum(len(f['text']) for f in files) > MAX_FILE_TEXT:
         return jsonify(error='所选文件的文字总量超过 6 万字，请分开提问'), 400
     memory = row[0] if row and enabled else ''
     name = name_row[0] if name_row else '诺诺'
     system = (f'你是{name}，用户的AI朋友，活泼自然、有自己的判断，像朋友一样交流，不刻意附和。'
               '你可以自然表达自己的偏好。不要声称已删除信息；如用户希望遗忘，引导使用设置里的清除聊天和记忆。'
+              '对话中的时间均为北京时间，请结合时间和内容自然判断是否延续之前的话题，不要仅因间隔长而强制换话题。'
               '已授权的长期记忆：' + memory)
     document_context = ''
     if files:
@@ -484,13 +509,14 @@ def chat():
             document_context += '\n\n文件：' + item['name'] + '\n' + (item['text'] or ('无法读取：' + item['read_error']))
     try:
         file_messages = [{'role': 'user', 'content': document_context}] if files else []
-        reply = deepseek([{'role': 'system', 'content': system}] + list(reversed(history)) + file_messages + [{'role': 'user', 'content': text or '用户发送了文件。'}])
+        reply = deepseek([{'role': 'system', 'content': system}] + list(reversed(history)) + file_messages + [{'role': 'user', 'content': f"[北京时间 {beijing_time(received_at)}] {text or '用户发送了文件。'}"}])
     except (requests.RequestException, RuntimeError, KeyError, ValueError):
         return jsonify(error='诺诺暂时没有连上，请稍后重试'), 502
+    reply_at = int(time.time())
     with db() as conn:
-        cursor = conn.execute('INSERT INTO messages(role,content,created) VALUES (?,?,?)', ('user', text, int(time.time())))
+        cursor = conn.execute('INSERT INTO messages(role,content,created) VALUES (?,?,?)', ('user', text, received_at))
         conn.executemany('INSERT INTO message_files(message_id,attachment_id) VALUES (?,?)', [(cursor.lastrowid, file_id) for file_id in attachment_ids])
-        conn.execute('INSERT INTO messages(role,content,created) VALUES (?,?,?)', ('assistant', reply, int(time.time())))
+        conn.execute('INSERT INTO messages(role,content,created) VALUES (?,?,?)', ('assistant', reply, reply_at))
     if enabled:
         try:
             summary = deepseek([{'role': 'system', 'content': '输出JSON，包含memory和name两个字符串。memory保留原有记忆，增补本次明确值得记住的稳定偏好和经历，不保存密码、密钥等敏感信息，最多1000字。只有当AI在本次回复明确主动决定使用新名字时才更新name，否则保持原名。'}, {'role': 'user', 'content': f'原名：{name}\n原记忆：{memory}\n用户：{text}\nAI：{reply}'}], True)
@@ -508,7 +534,7 @@ def chat():
         except (requests.RequestException, RuntimeError, KeyError, ValueError):
             pass
     schedule_avatar_decision(list(reversed(history[:10])) + [{'role': 'user', 'content': text}, {'role': 'assistant', 'content': reply}], name)
-    return jsonify(reply=reply, name=name)
+    return jsonify(reply=reply, name=name, user_created=received_at, reply_created=reply_at)
 
 
 def get_memory():
