@@ -1,0 +1,10 @@
+[Unit]
+Description=诺诺的每周头像决定
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/mnt/docker-data/WR-KidBookAI/yingni/app/server
+EnvironmentFile=/mnt/docker-data/WR-KidBookAI/yingni/.env
+Environment=YINGNI_DATA=/mnt/docker-data/WR-KidBookAI/yingni/data
+ExecStart=/mnt/docker-data/WR-KidBookAI/yingni/venv/bin/python avatar_weekly.py

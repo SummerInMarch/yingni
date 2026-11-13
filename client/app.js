@@ -112,9 +112,22 @@ $('#chat-form').addEventListener('submit', async event => {
   catch(e) { toast(e.message || '发送失败'); input.value = text; await loadMessages(); } finally { $('#send').disabled = false; }
 });
 
+// 诺诺资料由她自己维护，聊天标题可打开查看。
+const nonoPage = document.createElement('section'); nonoPage.className = 'screen'; nonoPage.id = 'nono-profile';
+nonoPage.innerHTML = '<header class="page-header"><button class="back" id="nono-back" aria-label="返回">←</button><span class="page-title">诺诺的资料</span><span class="header-spacer"></span></header><div class="profile-body nono-profile-body"><div class="profile-avatar nono-profile-avatar">◡</div><h1 id="nono-name"></h1><p class="muted" id="nono-signature"></p><div class="nono-mood" id="nono-mood"></div></div>';
+$('.phone').append(nonoPage);
+$('#nono-back').onclick = () => screen('chat');
+$('.chat-heading').setAttribute('role', 'button'); $('.chat-heading').setAttribute('tabindex', '0');
+async function showNonoProfile() {
+  try { const {profile} = await api('nono-profile'); setAvatar($('.nono-profile-avatar'), profile.avatar, '◡'); $('#nono-name').textContent = profile.name; $('#nono-signature').textContent = profile.signature || '还没有个性签名'; $('#nono-mood').textContent = `心情：${profile.mood}`; screen('nono-profile'); }
+  catch (error) { toast(error.message || '资料加载失败'); }
+}
+$('.chat-heading').onclick = showNonoProfile;
+$('.chat-heading').onkeydown = event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showNonoProfile(); } };
+
 // 文件会先保存到账号中，发送时再关联到聊天消息。
 const attachmentButton = document.createElement('button'); attachmentButton.type = 'button'; attachmentButton.className = 'attachment-button'; attachmentButton.textContent = '＋'; attachmentButton.setAttribute('aria-label', '上传文件');
-const fileInput = document.createElement('input'); fileInput.type = 'file'; fileInput.accept = '.txt,.docx,.pdf,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document'; fileInput.multiple = true; fileInput.hidden = true;
+const fileInput = document.createElement('input'); fileInput.type = 'file'; fileInput.accept = '.txt,.md,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document'; fileInput.multiple = true; fileInput.hidden = true;
 $('#chat-form').insertBefore(attachmentButton, $('#send')); $('.chat-composer').append(fileInput);
 const fileQueue = document.createElement('div'); fileQueue.className = 'file-queue'; fileQueue.hidden = true;
 $('.chat-composer').insertBefore(fileQueue, $('#chat-form'));
@@ -137,7 +150,7 @@ function selectFile(file) {
 fileInput.onchange = async () => {
   const files = [...fileInput.files]; fileInput.value = '';
   if (files.length + selectedFiles.length > 3) return toast('一条消息最多选择 3 个文件');
-  if (files.some(file => file.size === 0 || file.size > 10 * 1024 * 1024 || !/\.(txt|docx|pdf)$/i.test(file.name))) return toast('请选择不超过 10 MB 的 TXT、DOCX 或 PDF 文件');
+  if (files.some(file => file.size === 0 || file.size > 10 * 1024 * 1024 || !/\.(txt|md|docx|pdf)$/i.test(file.name))) return toast('请选择不超过 10 MB 的 TXT、MD、DOCX 或 PDF 文件');
   busy('正在上传和读取文件…');
   try {
     for (const file of files) {
@@ -178,7 +191,7 @@ async function loadFiles() {
 }
 async function downloadDocument(file) {
   const extension = file.name.split('.').pop().toLowerCase();
-  const mime = {txt:'text/plain', pdf:'application/pdf', docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}[extension];
+  const mime = {txt:'text/plain', md:'text/plain', pdf:'application/pdf', docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}[extension];
   if (!mime) return toast('不支持此文件类型');
   if (window.Yingni) {
     if (typeof window.Yingni.saveDocument === 'function') return window.Yingni.saveDocument(file.id, access, displayFileName(file.name), mime);

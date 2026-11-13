@@ -129,7 +129,20 @@ class AppTest(unittest.TestCase):
         self.assertEqual(client.get('/files/' + note['id'], headers=headers).status_code, 404)
         self.assertFalse((app.ROOT / 'files' / note['id']).exists())
         self.assertEqual(len(client.get('/files', headers=headers).json['files']), 3)
+        markdown = client.post('/files', headers=headers, data={'file': (io.BytesIO('# 测试笔记'.encode()), '笔记.md')}, content_type='multipart/form-data')
+        self.assertEqual(markdown.status_code, 200)
+        self.assertEqual(app.document_text('# 测试笔记'.encode(), 'md'), ('# 测试笔记', ''))
+        saved_markdown = client.get('/files/' + markdown.json['file']['id'], headers=headers)
+        self.assertEqual(saved_markdown.data, '# 测试笔记'.encode()); saved_markdown.close()
+        self.assertEqual(client.get('/nono-profile').status_code, 401)
+        client.post('/memory-setting', headers=headers, json={'enabled': False})
+        decisions = ['我想用小诺这个名字，签名是一直向前。', '{"name":"小诺","signature":"一直向前","mood":"开心"}']
+        with patch.object(app, 'deepseek', side_effect=decisions), patch.object(app, 'schedule_avatar_decision'):
+            self.assertEqual(client.post('/chat', headers=headers, json={'message': '你想叫啥？'}).status_code, 200)
+        profile = client.get('/nono-profile', headers=headers).json['profile']
+        self.assertEqual((profile['name'], profile['signature'], profile['mood']), ('小诺', '一直向前', '开心'))
         self.assertEqual(app.get_memory(), '')
+
         self.assertEqual(len(client.get('/works', headers=headers).json['works']), 1)
         self.assertEqual(client.post('/logout', headers=headers).status_code, 200)
         self.assertEqual(client.get('/works', headers=headers).status_code, 401)

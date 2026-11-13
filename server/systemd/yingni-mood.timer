@@ -1,0 +1,9 @@
+[Unit]
+Description=更新诺诺的模拟心情
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

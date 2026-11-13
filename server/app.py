@@ -189,12 +189,12 @@ def messages():
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_FILE_TEXT = 60_000
-FILE_TYPES = {'txt': 'text/plain', 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'pdf': 'application/pdf'}
+FILE_TYPES = {'txt': 'text/plain', 'md': 'text/plain', 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'pdf': 'application/pdf'}
 
 
 def document_text(raw, kind):
     """提取文本；复杂文档不完整时明确提示，不伪称已读完。"""
-    if kind == 'txt':
+    if kind in ('txt', 'md'):
         encodings = ('utf-8-sig', 'gb18030')
         if raw.startswith((b'\xff\xfe', b'\xfe\xff')):
             encodings = ('utf-16',)
@@ -272,7 +272,7 @@ def files():
             return jsonify(error='文件名不正确或过长'), 400
         kind = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
         if kind not in FILE_TYPES:
-            return jsonify(error='暂时只支持 TXT、DOCX 和 PDF'), 400
+            return jsonify(error='暂时只支持 TXT、MD、DOCX 和 PDF'), 400
         raw = upload.stream.read(MAX_FILE_BYTES + 1)
         if not raw or len(raw) > MAX_FILE_BYTES:
             return jsonify(error='文件为空或超过 10 MB'), 400
@@ -410,6 +410,7 @@ def consider_avatar(history, name):
             if last and time.time() - int(last[0]) < AVATAR_INTERVAL:
                 return
             conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar', ?)", (avatar,))
+            conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar_description', ?)", (prompt[:600],))
             conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_avatar_changed', ?)", (str(int(time.time())),))
     except (requests.RequestException, RuntimeError, KeyError, ValueError, TypeError, IndexError) as exc:
         app.logger.warning('诺诺头像生成未完成，错误类型：%s', type(exc).__name__)
@@ -443,6 +444,32 @@ def avatar_initialize():
 
 def beijing_time(timestamp):
     return datetime.fromtimestamp(timestamp, timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
+
+
+MOODS = ('平静', '开心', '期待', '放松', '低落')
+
+
+def get_nono_profile():
+    # 长时间没有聊天时，以有限的随机变化模拟状态，不推断真实情绪。
+    now = int(time.time())
+    with db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        rows = conn.execute("SELECT key,value FROM state WHERE key IN ('nono_name','nono_signature','nono_mood','nono_mood_changed','nono_avatar_description','nono_avatar')").fetchall()
+        values = {row['key']: row['value'] for row in rows}
+        if now - int(values.get('nono_mood_changed', '0')) >= 6 * 3600:
+            values['nono_mood'] = secrets.choice(MOODS)
+            values['nono_mood_changed'] = str(now)
+            conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_mood', ?)", (values['nono_mood'],))
+            conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_mood_changed', ?)", (values['nono_mood_changed'],))
+    return {'name': values.get('nono_name', '诺诺'), 'signature': values.get('nono_signature', ''),
+            'mood': values.get('nono_mood', '平静'), 'avatar': values.get('nono_avatar', ''),
+            'avatar_description': values.get('nono_avatar_description', '')}
+
+
+@app.get('/nono-profile')
+@authenticated
+def nono_profile():
+    return jsonify(profile=get_nono_profile())
 
 
 @app.post('/memory-setting')
@@ -495,9 +522,13 @@ def chat():
     if sum(len(f['text']) for f in files) > MAX_FILE_TEXT:
         return jsonify(error='所选文件的文字总量超过 6 万字，请分开提问'), 400
     memory = row[0] if row and enabled else ''
-    name = name_row[0] if name_row else '诺诺'
+    profile = get_nono_profile()
+    name = profile['name']
+    avatar_note = profile['avatar_description'] or ('已有头像，但生成描述没有保存，无法确认具体内容' if profile['avatar'] else '还没有头像')
     system = (f'你是{name}，用户的AI朋友，活泼自然、有自己的判断，像朋友一样交流，不刻意附和。'
               '你可以自然表达自己的偏好。不要声称已删除信息；如用户希望遗忘，引导使用设置里的清除聊天和记忆。'
+              f"你的个人资料：姓名={name}；签名={profile['signature'] or '暂未设置'}；模拟心情={profile['mood']}；头像={avatar_note}。"
+              '你可以决定自己的姓名和个性签名，系统也会定期询问你是否更换头像。不要声称已经修改，除非你明确决定修改。'
               '对话中的时间均为北京时间，请结合时间和内容自然判断是否延续之前的话题，不要仅因间隔长而强制换话题。'
               '已授权的长期记忆：' + memory)
     document_context = ''
@@ -517,23 +548,31 @@ def chat():
         cursor = conn.execute('INSERT INTO messages(role,content,created) VALUES (?,?,?)', ('user', text, received_at))
         conn.executemany('INSERT INTO message_files(message_id,attachment_id) VALUES (?,?)', [(cursor.lastrowid, file_id) for file_id in attachment_ids])
         conn.execute('INSERT INTO messages(role,content,created) VALUES (?,?,?)', ('assistant', reply, reply_at))
-    if enabled:
-        try:
-            summary = deepseek([{'role': 'system', 'content': '输出JSON，包含memory和name两个字符串。memory保留原有记忆，增补本次明确值得记住的稳定偏好和经历，不保存密码、密钥等敏感信息，最多1000字。只有当AI在本次回复明确主动决定使用新名字时才更新name，否则保持原名。'}, {'role': 'user', 'content': f'原名：{name}\n原记忆：{memory}\n用户：{text}\nAI：{reply}'}], True)
-            parsed = json.loads(summary)
-            updated_memory = parsed.get('memory', memory)
-            new_name = parsed.get('name', name)
-            if not isinstance(updated_memory, str):
-                updated_memory = memory
-            if not isinstance(new_name, str) or not 1 <= len(new_name) <= 12 or (new_name != name and new_name not in reply):
-                new_name = name
-            with db() as conn:
-                conn.execute("INSERT OR REPLACE INTO state VALUES ('memory',?)", (updated_memory[:3000],))
-                conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_name',?)", (new_name,))
-            name = new_name
-        except (requests.RequestException, RuntimeError, KeyError, ValueError):
-            pass
-    schedule_avatar_decision(list(reversed(history[:10])) + [{'role': 'user', 'content': text}, {'role': 'assistant', 'content': reply}], name)
+    # 资料和心情独立于长期记忆开关。
+    try:
+        summary = deepseek([{'role': 'system', 'content': '输出JSON，包含memory、name、signature、mood字符串。memory保留原有记忆，增补本次明确值得记住的稳定偏好和经历，不保存敏感信息。只有AI在本次回复明确主动决定修改姓名或个性签名时才更新相应字段，否则保留原值。mood结合本次聊天从平静、开心、期待、放松、低落中选择。'}, {'role': 'user', 'content': f"原名：{name}\n原签名：{profile['signature']}\n原心情：{profile['mood']}\n原记忆：{memory}\n用户：{text}\nAI：{reply}"}], True)
+        parsed = json.loads(summary)
+        updated_memory = parsed.get('memory', memory)
+        new_name = parsed.get('name', name)
+        if not isinstance(updated_memory, str):
+            updated_memory = memory
+        if not isinstance(new_name, str) or not 1 <= len(new_name) <= 12 or (new_name != name and new_name not in reply):
+            new_name = name
+        signature = parsed.get('signature', profile['signature'])
+        if not isinstance(signature, str) or len(signature) > 100 or (signature != profile['signature'] and signature not in reply):
+            signature = profile['signature']
+        mood = parsed.get('mood', profile['mood'])
+        if mood not in MOODS: mood = profile['mood']
+        with db() as conn:
+            if enabled: conn.execute("INSERT OR REPLACE INTO state VALUES ('memory',?)", (updated_memory[:3000],))
+            conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_name',?)", (new_name,))
+            conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_signature',?)", (signature,))
+            conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_mood',?)", (mood,))
+            conn.execute("INSERT OR REPLACE INTO state VALUES ('nono_mood_changed',?)", (str(int(time.time())),))
+        name = new_name
+    except (requests.RequestException, RuntimeError, KeyError, ValueError, AttributeError, TypeError):
+        app.logger.warning('诺诺资料更新未完成')
+    schedule_avatar_decision(list(reversed(history[:10])) + [{'role': 'user', 'content': text}, {'role': 'assistant', 'content': reply}], name, initial_only=True)
     return jsonify(reply=reply, name=name, user_created=received_at, reply_created=reply_at)
 
 
