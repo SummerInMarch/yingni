@@ -135,8 +135,9 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && rec
 voiceButton.onclick = async () => {
   if (recorder && recorder.state === 'recording') { recorder.stop(); return; }
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder || !MediaRecorder.isTypeSupported('audio/webm')) return toast('请安装支持录音的新版映你');
+  let stream;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    stream = await navigator.mediaDevices.getUserMedia({audio:true});
     recorder = new MediaRecorder(stream, {mimeType:'audio/webm'}); voiceChunks = [];
     recorder.ondataavailable = event => { if (event.data.size) voiceChunks.push(event.data); };
     recorder.onstop = async () => {
@@ -146,7 +147,13 @@ voiceButton.onclick = async () => {
       catch (error) { toast(error.message || '语音识别失败'); } finally { busy(); recorder = null; }
     };
     recorder.start(); voiceButton.textContent = '■'; recordingTimer = setTimeout(() => { if (recorder?.state === 'recording') recorder.stop(); }, 60000); toast('开始录音，再点一次结束');
-  } catch { toast('无法录音，请检查麦克风权限'); }
+  } catch (error) {
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') toast('麦克风权限被拒绝，请在手机设置中允许映你使用麦克风');
+    else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') toast('没有找到可用的麦克风');
+    else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') toast('麦克风暂不可用，请检查是否被其他应用占用');
+    else toast('录音启动失败，请确认已安装新版映你');
+  }
 };
 const voiceControl = document.createElement('button'); voiceControl.type = 'button'; voiceControl.textContent = '♫　设置诺诺的声音（上传 10–20 秒录音）';
 const voiceSample = document.createElement('input'); voiceSample.type = 'file'; voiceSample.accept = '.wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4'; voiceSample.hidden = true;

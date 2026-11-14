@@ -55,12 +55,16 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     Uri origin = request.getOrigin();
                     String[] resources = request.getResources();
+                    boolean requestsAudio = false;
+                    for (String resource : resources) {
+                        if (PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resource)) requestsAudio = true;
+                    }
                     if (!"https".equals(origin.getScheme()) || !"home.samoyeai.com".equals(origin.getHost()) ||
-                            resources.length != 1 || !PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resources[0]) || microphoneRequest != null) {
+                            !requestsAudio || microphoneRequest != null) {
                         request.deny(); return;
                     }
                     if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                        request.grant(resources); return;
+                        request.grant(new String[]{PermissionRequest.RESOURCE_AUDIO_CAPTURE}); return;
                     }
                     microphoneRequest = request;
                     requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 43);

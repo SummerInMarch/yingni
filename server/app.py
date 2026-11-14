@@ -184,6 +184,40 @@ def deepseek(messages, json_mode=False):
     return response.json()['choices'][0]['message']['content']
 
 
+VOICE_TOOL = {'type': 'function', 'function': {
+    'name': 'send_voice',
+    'description': '用自己已设置的声音发送一条简短语音。适合自然的短回复，较长回复请直接使用文字。',
+    'parameters': {'type': 'object', 'properties': {'text': {'type': 'string', 'description': '要说的具体内容'}}, 'required': ['text']}
+}}
+
+
+def deepseek_with_voice(messages):
+    """由模型决定使用文字或调用语音工具。"""
+    payload = {'model': os.environ.get('DEEPSEEK_MODEL', 'deepseek-flash'), 'messages': messages,
+               'temperature': 0.7, 'tools': [VOICE_TOOL], 'tool_choice': 'auto',
+               'thinking': {'type': 'disabled'}}
+    response = requests.post('https://api.deepseek.com/chat/completions',
+                             headers={'Authorization': 'Bearer ' + os.environ['DEEPSEEK_API_KEY']},
+                             json=payload, timeout=100)
+    if not response.ok:
+        raise RuntimeError('聊天模型调用失败')
+    message = response.json()['choices'][0]['message']
+    calls = message.get('tool_calls') or []
+    if not calls:
+        reply = message.get('content')
+        if not isinstance(reply, str) or not reply.strip():
+            raise ValueError('聊天回复为空')
+        return reply, False
+    function = calls[0].get('function', {})
+    if function.get('name') != 'send_voice' or len(calls) != 1:
+        raise ValueError('工具调用无效')
+    args = json.loads(function.get('arguments', '{}'))
+    text = args.get('text') if isinstance(args, dict) else None
+    if not isinstance(text, str) or not text.strip() or len(text) > 4000:
+        raise ValueError('语音内容无效')
+    return text.strip(), True
+
+
 @app.get('/messages')
 @authenticated
 def messages():
@@ -709,7 +743,7 @@ def chat():
         if voice_id and not conn.execute('SELECT 1 FROM voice_files WHERE id=?', (voice_id,)).fetchone():
             return jsonify(error='录音不存在，请重新录制'), 400
         voice_row = conn.execute("SELECT value FROM state WHERE key='nono_voice'").fetchone()
-        history_rows = conn.execute('SELECT id,role,content,created FROM messages ORDER BY id DESC LIMIT 30').fetchall()
+        history_rows = conn.execute('SELECT id,role,content,created,EXISTS(SELECT 1 FROM message_voice v WHERE v.message_id=messages.id) AS has_voice FROM messages ORDER BY id DESC LIMIT 30').fetchall()
         row = conn.execute("SELECT value FROM state WHERE key='memory'").fetchone()
         name_row = conn.execute("SELECT value FROM state WHERE key='nono_name'").fetchone()
         enabled = bool(conn.execute('SELECT memory_enabled FROM account').fetchone()[0])
@@ -729,7 +763,7 @@ def chat():
             if not item:
                 return jsonify(error='选择的文件不存在，请重新选择'), 400
             files.append(dict(item))
-    history = [{'role': r['role'], 'content': f"[北京时间 {beijing_time(r['created'])}] {r['content']}"} for r in history_rows]
+    history = [{'role': r['role'], 'content': f"[北京时间 {beijing_time(r['created'])}{'，语音消息' if r['has_voice'] else ''}] {r['content']}"} for r in history_rows]
     memory = row[0] if row and enabled else ''
     profile = get_nono_profile()
     name = profile['name']
@@ -741,6 +775,8 @@ def chat():
               '你可以决定自己的姓名和个性签名，系统也会定期询问你是否更换头像。不要声称已经修改，除非你明确决定修改。'
               '对话中的时间均为北京时间，请结合时间和内容自然判断是否延续之前的话题，不要仅因间隔长而强制换话题。'
               '已授权的长期记忆：' + memory)
+    system += ('你已经设置了自己的声音，可以自主选择使用语音工具发送简短回复。语音最终超过20秒或合成失败时会以文字发送。'
+               if voice_row else '你当前还没有设置声音，暂时不能发送语音。')
     document_context = ''
     if files:
         # 有附件时直接检索；后续聊天由模型结合上下文判断是否需要文件。
@@ -820,12 +856,13 @@ def chat():
                     return jsonify(error='文件检索暂时失败，请稍后重试'), 503
     try:
         file_messages = [{'role': 'user', 'content': document_context}] if document_context else []
-        reply = deepseek([{'role': 'system', 'content': system}] + list(reversed(history)) + file_messages + [{'role': 'user', 'content': f"[北京时间 {beijing_time(received_at)}] {text or '用户发送了文件。'}"}])
+        conversation = [{'role': 'system', 'content': system}] + list(reversed(history)) + file_messages + [{'role': 'user', 'content': f"[北京时间 {beijing_time(received_at)}] {text or '用户发送了文件。'}"}]
+        reply, wants_voice = deepseek_with_voice(conversation) if voice_row else (deepseek(conversation), False)
     except (requests.RequestException, RuntimeError, KeyError, ValueError):
         return jsonify(error='诺诺暂时没有连上，请稍后重试'), 502
     reply_voice = ''
-    # 只为短回复随机生成语音；实际超过 20 秒则退回文字。
-    if voice_row and len(reply) <= 100 and secrets.randbelow(2) == 0:
+    # 执行模型选择的语音工具，过长或失败时保留文字。
+    if voice_row and wants_voice and len(reply) <= 100:
         try:
             speech, duration = voice.synthesize(re.sub(r'[*#_`]', '', reply), voice_row[0])
             if 0 < duration <= 20: reply_voice = save_voice(speech, 'audio/wav')

@@ -135,14 +135,19 @@ class AppTest(unittest.TestCase):
             recording = client.post('/voice/transcribe', headers=headers, data={'file': (io.BytesIO(b'\x1a\x45\xdf\xa3voice'), 'voice.webm')}, content_type='multipart/form-data')
             self.assertEqual(recording.status_code, 200)
         voice_id = recording.json['voice_id']
-        with patch.object(app, 'deepseek', side_effect=['{"use_files":false}', '你好呀', '{"memory":"","name":"诺诺"}']), patch.object(app, 'schedule_avatar_decision'), patch.object(app.secrets, 'randbelow', return_value=0), patch.object(app.voice, 'synthesize', return_value=(b'test wav', 2)):
+        with patch.object(app, 'deepseek', side_effect=['{"use_files":false}', '{"memory":"","name":"诺诺"}']), patch.object(app, 'deepseek_with_voice', return_value=('你好呀', True)), patch.object(app, 'schedule_avatar_decision'), patch.object(app.voice, 'synthesize', return_value=(b'test wav', 2)):
             spoken = client.post('/chat', headers=headers, json={'message': recording.json['text'], 'voice_id': voice_id})
             self.assertTrue(spoken.json['voice_id'])
         spoken_audio = client.get('/voice/' + spoken.json['voice_id'], headers=headers)
         self.assertEqual(spoken_audio.data, b'test wav'); spoken_audio.close()
         self.assertEqual(client.get('/voice/' + voice_id).status_code, 401)
         self.assertEqual(client.get('/messages', headers=headers).json['messages'][-2]['voice_id'], voice_id)
-        with patch.object(app, 'deepseek', side_effect=['{"use_files":false}', '很长的语音', '{"memory":"","name":"诺诺"}']), patch.object(app, 'schedule_avatar_decision'), patch.object(app.secrets, 'randbelow', return_value=0), patch.object(app.voice, 'synthesize', return_value=(b'test wav', 21)):
+        with patch.object(app, 'deepseek', side_effect=['{"use_files":false}', '{"memory":"","name":"诺诺"}']), patch.object(app, 'deepseek_with_voice', return_value=('我打字回复', False)), patch.object(app, 'schedule_avatar_decision'), patch.object(app.voice, 'synthesize') as synthesize:
+            typed = client.post('/chat', headers=headers, json={'message': '请打字'})
+            self.assertEqual(typed.status_code, 200)
+            self.assertFalse(typed.json['voice_id'])
+            synthesize.assert_not_called()
+        with patch.object(app, 'deepseek', side_effect=['{"use_files":false}', '{"memory":"","name":"诺诺"}']), patch.object(app, 'deepseek_with_voice', return_value=('很长的语音', True)), patch.object(app, 'schedule_avatar_decision'), patch.object(app.voice, 'synthesize', return_value=(b'test wav', 21)):
             self.assertFalse(client.post('/chat', headers=headers, json={'message': '继续说'}).json['voice_id'])
         with patch.object(app, 'deepseek', return_value='{"scenes":["第一幕","第二幕"]}'), patch.object(app, 'make_image', return_value=b'fake image'):
             generated = client.post('/generate', headers=headers, json={'story': '测试故事', 'count': 2, 'refs': []})
@@ -168,8 +173,8 @@ class AppTest(unittest.TestCase):
         self.assertEqual(saved_markdown.data, '# 测试笔记'.encode()); saved_markdown.close()
         self.assertEqual(client.get('/nono-profile').status_code, 401)
         client.post('/memory-setting', headers=headers, json={'enabled': False})
-        decisions = ['我想用小诺这个名字，签名是一直向前。', '{"name":"小诺","signature":"一直向前","mood":"开心"}']
-        with patch.object(app, 'deepseek', side_effect=decisions), patch.object(app, 'schedule_avatar_decision'):
+        decisions = ['{"name":"小诺","signature":"一直向前","mood":"开心"}']
+        with patch.object(app, 'deepseek', side_effect=decisions), patch.object(app, 'deepseek_with_voice', return_value=('我想用小诺这个名字，签名是一直向前。', False)), patch.object(app, 'schedule_avatar_decision'):
             self.assertEqual(client.post('/chat', headers=headers, json={'message': '你想叫啥？'}).status_code, 200)
         profile = client.get('/nono-profile', headers=headers).json['profile']
         self.assertEqual((profile['name'], profile['signature'], profile['mood']), ('小诺', '一直向前', '开心'))
@@ -178,6 +183,18 @@ class AppTest(unittest.TestCase):
         self.assertEqual(len(client.get('/works', headers=headers).json['works']), 1)
         self.assertEqual(client.post('/logout', headers=headers).status_code, 200)
         self.assertEqual(client.get('/works', headers=headers).status_code, 401)
+
+
+class VoiceToolTest(unittest.TestCase):
+    def test_model_selects_voice_or_text(self):
+        response = unittest.mock.Mock(ok=True)
+        with patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'test'}), patch.object(app.requests, 'post', return_value=response):
+            response.json.return_value = {'choices': [{'message': {'content': None, 'tool_calls': [{'function': {'name': 'send_voice', 'arguments': '{"text":"你好"}'}}]}}]}
+            self.assertEqual(app.deepseek_with_voice([]), ('你好', True))
+            response.json.return_value = {'choices': [{'message': {'content': '文字回复'}}]}
+            self.assertEqual(app.deepseek_with_voice([]), ('文字回复', False))
+            response.json.return_value = {'choices': [{'message': {'content': None, 'tool_calls': [{'function': {'name': 'unknown', 'arguments': '{}'}}]}}]}
+            with self.assertRaises(ValueError): app.deepseek_with_voice([])
 
 
 class FirstFileReadingTest(unittest.TestCase):
@@ -209,7 +226,10 @@ class FirstFileReadingTest(unittest.TestCase):
                     return '{"name":"诺诺", "signature":"", "mood":"平静"}'
                 captured.append(messages)
                 return '这是关键事实'
-            with patch.object(app, 'deepseek', side_effect=fake_deepseek):
+            def fake_voice(messages):
+                captured.append(messages)
+                return '这是关键事实', False
+            with patch.object(app, 'deepseek', side_effect=fake_deepseek), patch.object(app, 'deepseek_with_voice', side_effect=fake_voice):
                 response = client.post('/chat', headers=headers, json={'message':'文件中是什么？', 'attachments':[file_id]})
             self.assertEqual(response.status_code, 200)
             self.assertIn('完整正文中的关键事实', captured[0][-2]['content'])
