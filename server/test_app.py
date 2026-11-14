@@ -180,6 +180,42 @@ class AppTest(unittest.TestCase):
         self.assertEqual(client.get('/works', headers=headers).status_code, 401)
 
 
+class FirstFileReadingTest(unittest.TestCase):
+    def test_long_file_covers_all_text_and_question(self):
+        text = '甲' * 12000 + '乙' * 12000 + '结尾的关键事实'
+        calls = []
+        def fake_deepseek(messages, json_mode=False):
+            calls.append(messages)
+            return '已提取本段事实'
+        with patch.object(app, 'deepseek', side_effect=fake_deepseek):
+            context = app.first_file_context([{'name': 'long.txt', 'text': text, 'read_error': ''}], '关键事实是什么')
+        self.assertEqual(len(calls), 3)
+        self.assertIn('结尾的关键事实', calls[-1][-1]['content'])
+        self.assertTrue(all('关键事实是什么' in call[-1]['content'] for call in calls))
+        self.assertIn('覆盖文件全部正文', context)
+
+    def test_first_chat_works_before_index_ready(self):
+        client = app.app.test_client()
+        with app.db() as conn:
+            conn.execute("UPDATE account SET memory_enabled=0")
+        headers = {'Authorization': 'Bearer ' + app.token()}
+        with patch.object(app.index_executor, 'submit'), patch.object(app, 'schedule_avatar_decision'):
+            uploaded = client.post('/files', headers=headers, data={'file': (io.BytesIO('完整正文中的关键事实'.encode()), 'pending.txt')}, content_type='multipart/form-data')
+            file_id = uploaded.json['file']['id']
+            self.assertEqual(client.get('/files/' + file_id + '/index', headers=headers).json['status'], 'queued')
+            captured = []
+            def fake_deepseek(messages, json_mode=False):
+                if json_mode:
+                    return '{"name":"诺诺", "signature":"", "mood":"平静"}'
+                captured.append(messages)
+                return '这是关键事实'
+            with patch.object(app, 'deepseek', side_effect=fake_deepseek):
+                response = client.post('/chat', headers=headers, json={'message':'文件中是什么？', 'attachments':[file_id]})
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('完整正文中的关键事实', captured[0][-2]['content'])
+            self.assertEqual(client.delete('/files/' + file_id, headers=headers).status_code, 200)
+
+
 class DocumentUploadTest(unittest.TestCase):
     def test_long_upload_index_retry_and_delete(self):
         from pathlib import Path
