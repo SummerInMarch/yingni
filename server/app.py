@@ -215,11 +215,13 @@ VOICE_TOOL = {'type': 'function', 'function': {
 }}
 
 
-def deepseek_with_voice(messages):
+def deepseek_with_voice(messages, force=False):
     """由模型决定使用文字或调用语音工具。"""
     payload = {'model': os.environ.get('DEEPSEEK_MODEL', 'deepseek-flash'), 'messages': messages,
                'temperature': 0.7, 'tools': [VOICE_TOOL], 'tool_choice': 'auto',
                'thinking': {'type': 'disabled'}}
+    if force:
+        payload['tool_choice'] = {'type': 'function', 'function': {'name': 'send_voice'}}
     response = requests.post('https://api.deepseek.com/chat/completions',
                              headers={'Authorization': 'Bearer ' + os.environ['DEEPSEEK_API_KEY']},
                              json=payload, timeout=100)
@@ -580,6 +582,24 @@ def beijing_time(timestamp):
     return datetime.fromtimestamp(timestamp, timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S')
 
 
+def clean_assistant_text(text):
+    # 清除模型误输出的元信息；用户自己的文字不受影响。
+    return re.sub(r'^(?:\s*\[北京时间\s*\d{4}-\d\d-\d\d\s+\d\d:\d\d(?::\d\d)?(?:\s*[，,]\s*语音消息)?\]\s*)+', '', text).strip()
+
+
+def limit_history(rows, budget=8000):
+    # 无 DeepSeek 分词器时按 UTF-8 字节保守估算，避免固定条数造成超长上下文。
+    selected, used = [], 0
+    for row in rows:
+        content = clean_assistant_text(row['content']) if row['role'] == 'assistant' else row['content']
+        cost = len(content.encode('utf-8')) + 100
+        if selected and used + cost > budget * 2:
+            break
+        selected.append({'role': row['role'], 'content': f"[北京时间 {beijing_time(row['created'])}{'，语音消息' if row['has_voice'] else '，文字消息'}] {content}"})
+        used += cost
+    return selected
+
+
 MOODS = ('平静', '开心', '期待', '放松', '低落')
 
 
@@ -748,7 +768,7 @@ def chat():
             if not item:
                 return jsonify(error='选择的文件不存在，请重新选择'), 400
             files.append(dict(item))
-    history = [{'role': r['role'], 'content': f"[北京时间 {beijing_time(r['created'])}{'，语音消息' if r['has_voice'] else ''}] {r['content']}"} for r in history_rows]
+    history = limit_history(history_rows)
     memory = row[0] if row and enabled else ''
     profile = get_nono_profile()
     name = profile['name']
@@ -758,9 +778,9 @@ def chat():
               f"你的个人资料：姓名={name}；签名={profile['signature'] or '暂未设置'}；模拟心情={profile['mood']}；头像={avatar_note}。"
               '回复长度要自然变化：日常寒暄简短，需要深入交流时可以较长，不要每次都写成大段。'
               '你可以决定自己的姓名和个性签名，系统也会定期询问你是否更换头像。不要声称已经修改，除非你明确决定修改。'
-              '对话中的时间均为北京时间，请结合时间和内容自然判断是否延续之前的话题，不要仅因间隔长而强制换话题。'
+              '对话中方括号内的时间和消息类型是系统提供的元信息，禁止在回复或工具参数中复述、伪造这些标记。只有标记为语音消息才是实际发送的语音。结合时间和内容自然判断是否延续话题。'
               '已授权的长期记忆：' + memory)
-    system += ('你已经设置了自己的声音，可以自主选择使用语音工具发送简短回复。语音最终超过20秒或合成失败时会以文字发送。'
+    system += ('你已经设置了自己的声音，可以自主选择使用 send_voice 工具发送简短语音，短回复有时主动使用语音，长回复使用文字。只有真正调用工具才会尝试发送语音，文字里写语音标签不会发送语音。不要声称已经发送语音；语音合成可能失败。语音最终超过20秒或合成失败时会以文字发送。'
                if voice_row else '你当前还没有设置声音，暂时不能发送语音。')
     document_context = ''
     if files:
@@ -801,8 +821,13 @@ def chat():
                     return jsonify(error='文件读取失败，请重新上传'), 400
     try:
         file_messages = [{'role': 'user', 'content': document_context}] if document_context else []
-        conversation = [{'role': 'system', 'content': system}] + list(reversed(history)) + file_messages + [{'role': 'user', 'content': f"[北京时间 {beijing_time(received_at)}] {text or '用户发送了文件。'}"}]
-        reply, wants_voice = deepseek_with_voice(conversation) if voice_row else (deepseek(conversation), False)
+        conversation = [{'role': 'system', 'content': system}] + list(reversed(history)) + file_messages + [{'role': 'user', 'content': f"[北京时间 {beijing_time(received_at)}，{'语音消息' if voice_id else '文字消息'}] {text or '用户发送了文件。'}"}]
+        force_voice = bool(re.search(r'(用|发|来|给我|请).{0,8}语音.{0,6}(回|说|聊|吧|一下)|语音(回复|回答|说话)', text))
+        reply, wants_voice = (deepseek_with_voice(conversation, force=True) if force_voice else deepseek_with_voice(conversation)) if voice_row else (deepseek(conversation), False)
+        reply = clean_assistant_text(reply)
+        if not reply:
+            raise ValueError('回复内容为空')
+        app.logger.info('语音决策: %s', '工具' if wants_voice else '文字')
     except (requests.RequestException, RuntimeError, KeyError, ValueError):
         return jsonify(error='诺诺暂时没有连上，请稍后重试'), 502
     reply_voice = ''
@@ -811,6 +836,7 @@ def chat():
         try:
             speech, duration = voice.synthesize(re.sub(r'[*#_`]', '', reply), voice_row[0])
             if 0 < duration <= 20: reply_voice = save_voice(speech, 'audio/wav')
+            else: app.logger.info('语音未发送：合成时长超出限制')
         except (RuntimeError, requests.RequestException, KeyError, ValueError, TypeError, wave.Error, EOFError):
             app.logger.warning('语音合成未完成，使用文字回复')
     reply_at = int(time.time())

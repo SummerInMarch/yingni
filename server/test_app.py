@@ -187,11 +187,20 @@ class AppTest(unittest.TestCase):
 
 
 class VoiceToolTest(unittest.TestCase):
+    def test_removes_generated_metadata_and_limits_history(self):
+        self.assertEqual(app.clean_assistant_text('[北京时间 2026-11-14 22:11:01] [北京时间 2026-11-14 22:11:01，语音消息] 你好'), '你好')
+        rows = [{'role': 'assistant', 'content': '甲' * 1000, 'created': 1, 'has_voice': False} for _ in range(12)]
+        selected = app.limit_history(rows, budget=4000)
+        self.assertLess(len(selected), len(rows))
+        self.assertIn('文字消息', selected[0]['content'])
+
     def test_model_selects_voice_or_text(self):
         response = unittest.mock.Mock(ok=True)
         with patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'test'}), patch.object(app.requests, 'post', return_value=response):
             response.json.return_value = {'choices': [{'message': {'content': None, 'tool_calls': [{'function': {'name': 'send_voice', 'arguments': '{"text":"你好"}'}}]}}]}
             self.assertEqual(app.deepseek_with_voice([]), ('你好', True))
+            self.assertEqual(app.deepseek_with_voice([], force=True), ('你好', True))
+            self.assertEqual(app.requests.post.call_args.kwargs['json']['tool_choice']['function']['name'], 'send_voice')
             response.json.return_value = {'choices': [{'message': {'content': '文字回复'}}]}
             self.assertEqual(app.deepseek_with_voice([]), ('文字回复', False))
             response.json.return_value = {'choices': [{'message': {'content': None, 'tool_calls': [{'function': {'name': 'unknown', 'arguments': '{}'}}]}}]}

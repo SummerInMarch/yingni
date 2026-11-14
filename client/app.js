@@ -81,6 +81,7 @@ function formatChatTime(timestamp) {
   return `${value('year')}-${value('month')}-${value('day')} ${value('hour')}:${value('minute')}`;
 }
 function addMessage(role, content, attachments = [], created = null, voiceId = '') {
+  if (role === 'assistant') content = content.replace(/^(?:\s*\[北京时间\s*\d{4}-\d\d-\d\d\s+\d\d:\d\d(?::\d\d)?(?:\s*[，,]\s*语音消息)?\]\s*)+/, '');
   const row = document.createElement('div'); row.className = 'message-row' + (role === 'user' ? ' mine' : '');
   const avatar = document.createElement('span'); avatar.className = 'avatar ' + (role === 'user' ? 'avatar-user' : 'avatar-nono');
   const source = role === 'user' ? userAvatar : nonoAvatar;
@@ -188,7 +189,12 @@ $('.profile-list').append(usageControl);
 usageControl.onclick = async () => {
   try {
     const {usage} = await api('model-usage');
-    alert(usage.length ? usage.map(item => `${item.category}（${item.model}）：${item.calls} 次\n输入 ${item.input_tokens}，其中缓存 ${item.cached_tokens}，输出 ${item.output_tokens} tokens`).join('\n\n') + '\n\n用量从此功能上线后开始记录；实际费用以服务商账单为准。' : '暂无用量记录');
+    alert(usage.length ? usage.map(item => {
+      const details = `${item.category}（${item.model}）：${item.calls} 次\n输入 ${item.input_tokens}，其中缓存 ${item.cached_tokens}，输出 ${item.output_tokens} tokens`;
+      if (item.model !== 'deepseek-flash') return details;
+      const cost = (Math.max(0, item.input_tokens - item.cached_tokens) + item.cached_tokens * .02 + item.output_tokens * 4) / 1000000;
+      return `${details}\n按当前公开价格估算 ¥${cost.toFixed(4)}–¥${(cost * 2).toFixed(4)}`;
+    }).join('\n\n') + '\n\n估算范围涵盖空闲及高峰时段，不含语音和图片费用；价格可能变化，实际扣费以服务商账单为准。用量从此功能上线后开始记录。' : '暂无用量记录');
   } catch (error) { toast(error.message); }
 };
 const voiceSample = document.createElement('input'); voiceSample.type = 'file'; voiceSample.accept = '.wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4'; voiceSample.hidden = true;
