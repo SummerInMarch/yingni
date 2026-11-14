@@ -28,6 +28,7 @@ public class MainActivity extends Activity {
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
     private PermissionRequest microphoneRequest;
+    private boolean nativeMicrophoneRequest;
     private String pendingPath;
     private String pendingToken;
 
@@ -86,6 +87,11 @@ public class MainActivity extends Activity {
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == 44 && nativeMicrophoneRequest) {
+            nativeMicrophoneRequest = false;
+            boolean granted = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+            web.evaluateJavascript("window.yingniMicrophoneResult(" + granted + ")", null);
+        }
         if (requestCode == 43 && microphoneRequest != null) {
             PermissionRequest request = microphoneRequest; microphoneRequest = null;
             if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) request.grant(new String[]{PermissionRequest.RESOURCE_AUDIO_CAPTURE});
@@ -110,6 +116,16 @@ public class MainActivity extends Activity {
     }
 
     private class NativeBridge {
+        @JavascriptInterface public void requestMicrophone() {
+            runOnUiThread(() -> {
+                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    web.evaluateJavascript("window.yingniMicrophoneResult(true)", null);
+                } else if (!nativeMicrophoneRequest) {
+                    nativeMicrophoneRequest = true;
+                    requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 44);
+                }
+            });
+        }
         @JavascriptInterface public void savePicture(String picture, String token, String mime) {
             if (picture == null || token == null || !picture.matches("[a-f0-9]{32}") || !token.matches("[A-Za-z0-9_-]{30,100}") || !("image/jpeg".equals(mime) || "image/png".equals(mime))) return;
             chooseDestination("picture/" + picture, token, mime, "yingni-" + picture.substring(0, 8) + ("image/jpeg".equals(mime) ? ".jpg" : ".png"));

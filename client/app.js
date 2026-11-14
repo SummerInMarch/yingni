@@ -88,13 +88,32 @@ function addMessage(role, content, attachments = [], created = null, voiceId = '
   else avatar.textContent = role === 'user' ? '我' : '◡';
   if (role !== 'user') row.append(avatar);
   const bubble = document.createElement('div'); bubble.className = 'bubble';
-  const message = document.createElement('span'); if (role === 'assistant') renderChatText(message, content); else message.textContent = content; bubble.append(message);
+  const message = document.createElement('span'); if (role === 'assistant') renderChatText(message, content); else message.textContent = content; message.hidden = !!voiceId; bubble.append(message);
   attachments.forEach(file => {
     const item = document.createElement('button'); item.type = 'button'; item.className = 'message-file';
     item.textContent = `📎 ${displayFileName(file.name)}${file.read_error ? '（暂不能阅读）' : ''}`;
     item.onclick = () => downloadDocument(file); bubble.append(item);
   });
-  if (voiceId) { const play = document.createElement('button'); play.type = 'button'; play.className = 'message-file voice-play'; play.textContent = '▶ 播放语音'; play.onclick = () => playVoice(voiceId); bubble.append(play); }
+  if (voiceId) {
+    const play = document.createElement('button'); play.type = 'button'; play.className = 'message-file voice-play'; play.textContent = '▶ 语音'; play.onclick = () => playVoice(voiceId);
+    let timer, held = false;
+    const showTextAction = () => {
+      held = true;
+      if (bubble.querySelector('.voice-text-action')) return;
+      const action = document.createElement('button'); action.type = 'button'; action.className = 'voice-text-action'; action.textContent = '转文字';
+      action.onclick = () => { message.hidden = false; action.remove(); }; bubble.append(action);
+    };
+    play.addEventListener('pointerdown', () => { held = false; timer = setTimeout(showTextAction, 600); });
+    ['pointerup', 'pointercancel', 'pointerleave'].forEach(event => play.addEventListener(event, () => clearTimeout(timer)));
+    play.addEventListener('contextmenu', event => { event.preventDefault(); showTextAction(); });
+    play.onclick = () => { if (!held) playVoice(voiceId); };
+    fetch(`voice/${voiceId}`, {headers:{Authorization:`Bearer ${access}`}}).then(r => { if (!r.ok) throw Error(); return r.blob(); }).then(blob => {
+      const url = URL.createObjectURL(blob), audio = new Audio(url);
+      audio.onloadedmetadata = () => { if (Number.isFinite(audio.duration)) play.textContent = `▶ ${Math.ceil(audio.duration)}″`; URL.revokeObjectURL(url); };
+      audio.onerror = () => URL.revokeObjectURL(url);
+    }).catch(() => {});
+    bubble.append(play);
+  }
   if (created) { const time = document.createElement('time'); time.className = 'message-time'; time.dateTime = new Date(created * 1000).toISOString(); time.textContent = formatChatTime(created); bubble.append(time); }
   row.append(bubble); $('#messages').append(row);
   if (role === 'user') row.append(avatar);
@@ -116,6 +135,13 @@ $('#chat-form').addEventListener('submit', async event => {
 
 // 语音仅在用户主动录制时使用麦克风，并在发送前展示识别文字。
 let recorder = null, voiceChunks = [], recordingTimer = null, playingAudio = null, playingUrl = '';
+function requestMicrophonePermission() {
+  if (!window.Yingni?.requestMicrophone) return Promise.resolve(true);
+  return new Promise(resolve => {
+    window.yingniMicrophoneResult = granted => { delete window.yingniMicrophoneResult; resolve(granted); };
+    window.Yingni.requestMicrophone();
+  });
+}
 const voiceButton = document.createElement('button'); voiceButton.type = 'button'; voiceButton.className = 'attachment-button'; voiceButton.textContent = '🎙'; voiceButton.setAttribute('aria-label', '录制语音');
 $('#chat-form').insertBefore(voiceButton, $('#send'));
 const recordingHint = document.createElement('button'); recordingHint.type = 'button'; recordingHint.className = 'file-chip'; recordingHint.hidden = true;
@@ -137,6 +163,7 @@ voiceButton.onclick = async () => {
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder || !MediaRecorder.isTypeSupported('audio/webm')) return toast('请安装支持录音的新版映你');
   let stream;
   try {
+    if (!await requestMicrophonePermission()) return toast('麦克风权限被拒绝，请在手机设置中允许映你使用麦克风');
     stream = await navigator.mediaDevices.getUserMedia({audio:true});
     recorder = new MediaRecorder(stream, {mimeType:'audio/webm'}); voiceChunks = [];
     recorder.ondataavailable = event => { if (event.data.size) voiceChunks.push(event.data); };
@@ -156,6 +183,14 @@ voiceButton.onclick = async () => {
   }
 };
 const voiceControl = document.createElement('button'); voiceControl.type = 'button'; voiceControl.textContent = '♫　设置诺诺的声音（上传 10–20 秒录音）';
+const usageControl = document.createElement('button'); usageControl.type = 'button'; usageControl.textContent = '◷　查看模型用量';
+$('.profile-list').append(usageControl);
+usageControl.onclick = async () => {
+  try {
+    const {usage} = await api('model-usage');
+    alert(usage.length ? usage.map(item => `${item.category}（${item.model}）：${item.calls} 次\n输入 ${item.input_tokens}，其中缓存 ${item.cached_tokens}，输出 ${item.output_tokens} tokens`).join('\n\n') + '\n\n用量从此功能上线后开始记录；实际费用以服务商账单为准。' : '暂无用量记录');
+  } catch (error) { toast(error.message); }
+};
 const voiceSample = document.createElement('input'); voiceSample.type = 'file'; voiceSample.accept = '.wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4'; voiceSample.hidden = true;
 $('.profile-list').append(voiceControl); $('.profile-body').append(voiceSample); voiceControl.onclick = () => voiceSample.click();
 voiceSample.onchange = async () => {
@@ -231,18 +266,7 @@ async function loadFiles() {
       const card = document.createElement('div'); card.className = 'file-card';
       const title = document.createElement('strong'); title.textContent = displayFileName(file.name); card.append(title);
       const detail = document.createElement('p'); detail.textContent = file.read_error || `${Math.max(1, Math.ceil(file.size / 1024))} KB · 可供诺诺阅读`; card.append(detail);
-      const status = document.createElement('p'); status.textContent = '正在查看文件索引状态…'; card.append(status);
       const actions = document.createElement('div'); actions.className = 'file-actions';
-      const retry = document.createElement('button'); retry.textContent = '建立索引'; retry.hidden = true;
-      async function refreshIndex() {
-        try {
-          const result = await api(`files/${file.id}/index`);
-          status.textContent = {ready:'索引已就绪', queued:'正在建立索引', failed:'索引失败，可重试', unindexed:'尚未建立索引'}[result.status] || '索引状态未知';
-          retry.hidden = result.status === 'ready' || result.status === 'queued';
-        } catch { status.textContent = '索引状态暂时不可用'; }
-      }
-      retry.onclick = async () => { try { await api(`files/${file.id}/index`, 'POST'); await refreshIndex(); } catch(e) { toast(e.message); } };
-      actions.append(retry); refreshIndex();
       const use = document.createElement('button'); use.textContent = '添加到聊天'; use.onclick = () => { selectFile(file); screen('chat'); };
       const save = document.createElement('button'); save.textContent = '保存到手机'; save.onclick = () => downloadDocument(file);
       const remove = document.createElement('button'); remove.textContent = '删除'; remove.onclick = async () => {

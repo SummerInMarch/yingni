@@ -4,6 +4,7 @@ import base64
 import io
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 from docx import Document
 from pypdf import PdfWriter
@@ -198,18 +199,13 @@ class VoiceToolTest(unittest.TestCase):
 
 
 class FirstFileReadingTest(unittest.TestCase):
-    def test_long_file_covers_all_text_and_question(self):
-        text = '甲' * 12000 + '乙' * 12000 + '结尾的关键事实'
-        calls = []
-        def fake_deepseek(messages, json_mode=False):
-            calls.append(messages)
-            return '已提取本段事实'
-        with patch.object(app, 'deepseek', side_effect=fake_deepseek):
-            context = app.first_file_context([{'name': 'long.txt', 'text': text, 'read_error': ''}], '关键事实是什么')
-        self.assertEqual(len(calls), 3)
-        self.assertIn('结尾的关键事实', calls[-1][-1]['content'])
-        self.assertTrue(all('关键事实是什么' in call[-1]['content'] for call in calls))
-        self.assertIn('覆盖文件全部正文', context)
+    def test_file_limit_does_not_call_model(self):
+        with patch.object(app, 'deepseek') as model:
+            with self.assertRaises(ValueError):
+                app.first_file_context([{'name': 'long.txt', 'text': '甲' * 10001, 'read_error': ''}], '问题')
+            model.assert_not_called()
+        context = app.first_file_context([{'name': 'ok.txt', 'text': '甲' * 10000, 'read_error': ''}], '')
+        self.assertIn('甲' * 10000, context)
 
     def test_first_chat_works_before_index_ready(self):
         client = app.app.test_client()
@@ -219,7 +215,7 @@ class FirstFileReadingTest(unittest.TestCase):
         with patch.object(app.index_executor, 'submit'), patch.object(app, 'schedule_avatar_decision'):
             uploaded = client.post('/files', headers=headers, data={'file': (io.BytesIO('完整正文中的关键事实'.encode()), 'pending.txt')}, content_type='multipart/form-data')
             file_id = uploaded.json['file']['id']
-            self.assertEqual(client.get('/files/' + file_id + '/index', headers=headers).json['status'], 'queued')
+            self.assertEqual(client.get('/files/' + file_id + '/index', headers=headers).json['status'], 'unindexed')
             captured = []
             def fake_deepseek(messages, json_mode=False):
                 if json_mode:
@@ -237,9 +233,8 @@ class FirstFileReadingTest(unittest.TestCase):
 
 
 class DocumentUploadTest(unittest.TestCase):
-    def test_long_upload_index_retry_and_delete(self):
-        from pathlib import Path
-        with tempfile.TemporaryDirectory(prefix='yingni-index-test-') as directory:
+    def test_upload_limit_and_no_indexing(self):
+        with tempfile.TemporaryDirectory(prefix='yingni-test-') as directory:
             root = Path(directory)
             (root / 'files').mkdir()
             with patch.object(app, 'ROOT', root):
@@ -247,38 +242,13 @@ class DocumentUploadTest(unittest.TestCase):
                 with app.db() as conn:
                     conn.execute("INSERT INTO account VALUES ('user', 'password', 0)")
                 headers = {'Authorization': 'Bearer ' + app.token()}
-                index = app.DocumentIndex(app.db, lambda texts, query: [[1.0, 0.0] for _ in texts], lambda text: text[:30],
-                                          lambda conn, file_id: bool(conn.execute('SELECT 1 FROM attachments WHERE id=?', (file_id,)).fetchone()))
-                def run_now(function, *args):
-                    function(*args)
-                with patch.object(app, 'get_document_index', return_value=index), patch.object(app.index_executor, 'submit', side_effect=run_now):
-                    client = app.app.test_client()
-                    raw = ('用于测试长文件内容。' * 7000).encode()
-                    result = client.post('/files', headers=headers, data={'file': (io.BytesIO(raw), 'large.txt')}, content_type='multipart/form-data')
-                    self.assertEqual(result.status_code, 200)
-                    file_id = result.json['file']['id']
-                    self.assertEqual(result.json['file']['read_error'], '')
-                    self.assertEqual(client.get('/files/' + file_id + '/index', headers=headers).json['status'], 'ready')
-                    with app.db() as conn:
-                        self.assertGreater(conn.execute('SELECT COUNT(*) FROM document_index WHERE file_id=?', (file_id,)).fetchone()[0], 1)
-                    with app.db() as conn:
-                        conn.execute("UPDATE attachments SET text='', read_error='文件文字超过 6 万字' WHERE id=?", (file_id,))
-                        conn.execute('DELETE FROM document_index WHERE file_id=?', (file_id,))
-                        conn.execute('DELETE FROM document_jobs WHERE file_id=?', (file_id,))
-                    self.assertEqual(client.post('/files/' + file_id + '/index', headers=headers).json['status'], 'ready')
-                    with app.db() as conn:
-                        restored = conn.execute('SELECT text,read_error FROM attachments WHERE id=?', (file_id,)).fetchone()
-                        self.assertGreater(len(restored['text']), 60000)
-                        self.assertEqual(restored['read_error'], '')
-                    with patch.object(app, 'get_document_index', side_effect=RuntimeError('test failure')):
-                        failed = client.post('/files', headers=headers, data={'file': (io.BytesIO(b'retry text'), 'retry.txt')}, content_type='multipart/form-data')
-                    retry_id = failed.json['file']['id']
-                    self.assertEqual(client.get('/files/' + retry_id + '/index', headers=headers).json['status'], 'failed')
-                    self.assertEqual(client.post('/files/' + retry_id + '/index', headers=headers).json['status'], 'ready')
-                    self.assertEqual(client.delete('/files/' + retry_id, headers=headers).status_code, 200)
-                    self.assertEqual(client.delete('/files/' + file_id, headers=headers).status_code, 200)
-                    with app.db() as conn:
-                        self.assertEqual(conn.execute('SELECT COUNT(*) FROM document_index WHERE file_id=?', (file_id,)).fetchone()[0], 0)
+                client = app.app.test_client()
+                with patch.object(app.index_executor, 'submit') as submit:
+                    large = client.post('/files', headers=headers, data={'file': (io.BytesIO(('甲' * 10001).encode()), 'large.txt')}, content_type='multipart/form-data')
+                    self.assertEqual(large.status_code, 400)
+                    small = client.post('/files', headers=headers, data={'file': (io.BytesIO(('甲' * 10000).encode()), 'small.txt')}, content_type='multipart/form-data')
+                    self.assertEqual(small.status_code, 200)
+                    submit.assert_not_called()
 
 
 
